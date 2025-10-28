@@ -1,3 +1,8 @@
+import 'dotenv/config';
+import fs from 'fs';
+import path from 'path';
+import { fileURLToPath } from 'url';
+import winston from 'winston';
 import express from 'express';
 import multer from 'multer';
 import pdf2md from '@opendocsg/pdf2md';
@@ -14,6 +19,53 @@ const upload = multer({ storage: multer.memoryStorage() });
 const turndown = new TurndownService({ codeBlockStyle: 'fenced' });
 turndown.use(gfm);
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const LOG_DIR = process.env.LOG_DIR ?? path.join(__dirname, 'logs');
+const LOG_TO_CONSOLE = process.env.ENABLE_CONSOLE_LOG !== 'false';
+const INCLUDE_HTML_RESPONSE = (process.env.CRAWL_INCLUDE_HTML ?? 'true').toLowerCase() !== 'false';
+const ENV_PORT = Number(process.env.PORT);
+const PORT = Number.isFinite(ENV_PORT) && ENV_PORT > 0 ? ENV_PORT : 8080;
+
+if (!fs.existsSync(LOG_DIR)) {
+  fs.mkdirSync(LOG_DIR, { recursive: true });
+}
+
+const currentDate = new Date().toISOString().split('T')[0];
+const fileLogFormat = winston.format.combine(
+  winston.format.timestamp(),
+  winston.format.printf(({ timestamp, level, message }) => `${timestamp} ${level}: ${message}`),
+);
+
+const loggerTransports = [
+  new winston.transports.File({
+    filename: path.join(LOG_DIR, `flashcrawl-${currentDate}.log`),
+    level: 'info',
+  }),
+  new winston.transports.File({
+    filename: path.join(LOG_DIR, `flashcrawl-error-${currentDate}.log`),
+    level: 'error',
+  }),
+];
+
+if (LOG_TO_CONSOLE) {
+  loggerTransports.push(
+    new winston.transports.Console({
+      format: winston.format.combine(
+        winston.format.colorize(),
+        winston.format.timestamp({ format: 'HH:mm:ss' }),
+        winston.format.printf(({ timestamp, level, message }) => `${timestamp} ${level}: ${message}`),
+      ),
+    }),
+  );
+}
+
+const logger = winston.createLogger({
+  level: 'info',
+  format: fileLogFormat,
+  transports: loggerTransports,
+});
+
 const statusNotes = {
   startTime: Date.now(),
   totalCrawls: 0,
@@ -24,8 +76,68 @@ const statusNotes = {
   lastError: null,
   lastWatchdogWarning: null,
   lastEventLoopLagMs: 0,
+  pdfAttempts: 0,
+  pdfConversions: 0,
+  pdfConversionFailures: 0,
+  spinnerStatus: 'starting up',
+  lastUrl: '—',
 };
 
+const spinnerState = {
+  status: 'starting up',
+  lastUrl: '—',
+};
+
+const statusSpinner = LOG_TO_CONSOLE ? ora({ spinner: 'dots', color: 'cyan' }) : null;
+
+const STATUS_COLORS = {
+  'starting up': chalk.yellow,
+  ready: chalk.green,
+  active: chalk.cyan,
+};
+
+const formatStatusLabel = (status) => {
+  const colorizer = STATUS_COLORS[status] ?? chalk.white;
+  return colorizer(`[${status}]`);
+};
+
+const formatStatsText = () => {
+  const totalOps = statusNotes.totalCrawls + statusNotes.pdfAttempts;
+  const totalText = chalk.blue(`total ${totalOps}`);
+  const htmlText = chalk.green(`html ${statusNotes.totalCrawls}`);
+  const pdfText = chalk.magenta(`pdf ${statusNotes.pdfAttempts}`);
+  const failedCount = statusNotes.failedCrawls + statusNotes.pdfConversionFailures;
+  const failedText = chalk.red(`failed ${failedCount}`);
+  return `${totalText} | ${htmlText} | ${pdfText} | ${failedText}`;
+};
+
+const refreshSpinner = ({ status, url } = {}) => {
+  if (status) {
+    spinnerState.status = status;
+  }
+  if (url !== undefined) {
+    spinnerState.lastUrl = url || '—';
+  }
+
+  statusNotes.spinnerStatus = spinnerState.status;
+  statusNotes.lastUrl = spinnerState.lastUrl;
+
+  if (!statusSpinner) {
+    return;
+  }
+
+  const statusLabel = formatStatusLabel(spinnerState.status);
+  const urlText = chalk.gray(spinnerState.lastUrl || '—');
+  const statsText = formatStatsText();
+
+  statusSpinner.text = `${statusLabel} ${urlText} ${chalk.dim('........')} ${statsText}`;
+
+  if (!statusSpinner.isSpinning) {
+    statusSpinner.start();
+  }
+};
+
+refreshSpinner({ status: 'starting up', url: '—' });
 const formatError = (value) => {
   if (value instanceof Error) {
     return value.stack || value.message || value.toString();
@@ -42,10 +154,13 @@ const formatError = (value) => {
 
 const getUptimeSeconds = () => Math.round((Date.now() - statusNotes.startTime) / 1000);
 
-const recordCrawlResult = ({ statusCode, error }) => {
+const recordCrawlResult = ({ statusCode, error, url }) => {
   statusNotes.totalCrawls += 1;
   statusNotes.lastCrawlAt = new Date().toISOString();
   statusNotes.lastStatusCode = statusCode;
+  if (url) {
+    statusNotes.lastUrl = url;
+  }
 
   if (error) {
     statusNotes.failedCrawls += 1;
@@ -54,6 +169,24 @@ const recordCrawlResult = ({ statusCode, error }) => {
     statusNotes.successfulCrawls += 1;
     statusNotes.lastError = null;
   }
+
+  refreshSpinner();
+};
+
+const recordPdfConversion = ({ statusCode, error }) => {
+  statusNotes.pdfAttempts += 1;
+  statusNotes.lastCrawlAt = new Date().toISOString();
+  statusNotes.lastStatusCode = statusCode;
+
+  if (error) {
+    statusNotes.pdfConversionFailures += 1;
+    statusNotes.lastError = error;
+  } else {
+    statusNotes.pdfConversions += 1;
+    statusNotes.lastError = null;
+  }
+
+  refreshSpinner();
 };
 
 const WATCHDOG_INTERVAL_MS = 10000;
@@ -102,6 +235,32 @@ const STRIP_SELECTORS = [
   'meta[http-equiv="refresh"]',
 ];
 
+const waitForHumanVerification = async (page) => {
+  const start = Date.now();
+
+  while (Date.now() - start < HUMAN_VERIFICATION_TIMEOUT_MS) {
+    try {
+      const challengeText = await page.evaluate(
+        () => document.body?.innerText || '',
+      );
+
+      const hasChallenge = HUMAN_VERIFICATION_PATTERNS.some((pattern) =>
+        pattern.test(challengeText),
+      );
+
+      if (!hasChallenge) {
+        return { cleared: true, waitedMs: Date.now() - start };
+      }
+    } catch (err) {
+      // Ignore transient evaluation errors due to navigation/reloads.
+    }
+
+    await page.waitForTimeout(HUMAN_VERIFICATION_CHECK_INTERVAL_MS);
+  }
+
+  return { cleared: false, waitedMs: Date.now() - start };
+};
+
 let watchdogTimer;
 const startWatchdog = () => {
   let lastTick = performance.now();
@@ -113,7 +272,7 @@ const startWatchdog = () => {
     if (lag > WATCHDOG_THRESHOLD_MS) {
       statusNotes.lastEventLoopLagMs = Math.round(lag);
       statusNotes.lastWatchdogWarning = new Date().toISOString();
-      console.warn(chalk.yellow(`[watchdog] Event loop lag detected: ${lag.toFixed(0)}ms`));
+      logger.warn(`[watchdog] Event loop lag detected: ${lag.toFixed(0)}ms`);
     }
 
     lastTick = now;
@@ -124,15 +283,12 @@ const startWatchdog = () => {
 
 const handleFatalError = (label, err) => {
   const message = formatError(err);
-  console.error(chalk.red(`[${label}] ${message}`));
+  logger.error(`[${label}] ${message}`);
   statusNotes.lastError = message;
 };
 
 process.on('unhandledRejection', (reason) => handleFatalError('unhandledRejection', reason));
 process.on('uncaughtException', (err) => handleFatalError('uncaughtException', err));
-
-// Optional: health check
-app.get('/', (_req, res) => res.json({ status: 'ok' }));
 
 // Basic status snapshot of the crawler
 app.get('/status', (_req, res) => {
@@ -141,9 +297,15 @@ app.get('/status', (_req, res) => {
     totalCrawls: statusNotes.totalCrawls,
     successfulCrawls: statusNotes.successfulCrawls,
     failedCrawls: statusNotes.failedCrawls,
+    pdfAttempts: statusNotes.pdfAttempts,
+    pdfConversions: statusNotes.pdfConversions,
+    pdfConversionFailures: statusNotes.pdfConversionFailures,
+    failedTotal: statusNotes.failedCrawls + statusNotes.pdfConversionFailures,
     lastCrawlAt: statusNotes.lastCrawlAt,
     lastStatusCode: statusNotes.lastStatusCode,
     lastError: statusNotes.lastError,
+    lastUrl: statusNotes.lastUrl,
+    spinnerStatus: statusNotes.spinnerStatus,
     watchdog: {
       lastWarning: statusNotes.lastWatchdogWarning,
       eventLoopLagMs: statusNotes.lastEventLoopLagMs,
@@ -154,17 +316,22 @@ app.get('/status', (_req, res) => {
 app.post('/convert', upload.single('file'), async (req, res) => {
   try {
     if (!req.file) {
-      return res.status(400).json({ error: 'No file provided' });
+      const message = 'No file provided';
+      recordPdfConversion({ statusCode: 400, error: message });
+      return res.status(400).json({ error: message });
     }
 
     // Convert PDF buffer to Markdown
     const markdown = await pdf2md(req.file.buffer, {});
 
     // Respond as JSON
+    recordPdfConversion({ statusCode: 200 });
     res.json({ markdown });
   } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: String(err) });
+    const message = formatError(err);
+    logger.error(`[convert] ${message}`);
+    recordPdfConversion({ statusCode: 500, error: message });
+    res.status(500).json({ error: message });
   }
 });
 
@@ -189,6 +356,7 @@ app.get('/crawl', async (req, res) => {
 
   let browser;
   try {
+    refreshSpinner({ status: 'active', url: targetUrl.href });
     browser = await puppeteer.launch({
       headless: 'new',
       args: ['--no-sandbox', '--disable-setuid-sandbox'],
@@ -215,7 +383,7 @@ app.get('/crawl', async (req, res) => {
         }
         await request.continue();
       } catch (err) {
-        console.error('Request handling error:', err);
+        logger.error(`Request handling error: ${formatError(err)}`);
       }
     };
 
@@ -230,11 +398,9 @@ app.get('/crawl', async (req, res) => {
     } catch (navigationErr) {
       if (redirectLimitExceeded) {
         const message = `Exceeded redirect limit of ${MAX_REDIRECTS}`;
-        recordCrawlResult({ statusCode: 310, error: message });
-        console.warn(
-          chalk.yellow(
-            `[crawl] ${message}. Observed ${redirectCountObserved} redirects while fetching ${targetUrl.href}`,
-          ),
+        recordCrawlResult({ statusCode: 310, error: message, url: targetUrl.href });
+        logger.warn(
+          `[crawl] ${message}. Observed ${redirectCountObserved} redirects while fetching ${targetUrl.href}`,
         );
         return res.status(310).json({
           error: message,
@@ -253,8 +419,8 @@ app.get('/crawl', async (req, res) => {
 
     if (!response) {
       const message = 'No response received from target URL';
-      recordCrawlResult({ statusCode: 502, error: message });
-      console.warn(chalk.yellow(`[crawl] ${message}: ${targetUrl.href}`));
+      recordCrawlResult({ statusCode: 502, error: message, url: targetUrl.href });
+      logger.warn(`[crawl] ${message}: ${targetUrl.href}`);
       return res.status(502).json({ error: message });
     }
 
@@ -281,18 +447,14 @@ app.get('/crawl', async (req, res) => {
 
     if (!verificationResult.cleared) {
       const message = `Verification challenge did not clear within ${HUMAN_VERIFICATION_TIMEOUT_MS}ms`;
-      recordCrawlResult({ statusCode: 524, error: message });
-      console.warn(
-        chalk.yellow(`[crawl] ${message} for ${targetUrl.href}`),
-      );
+      recordCrawlResult({ statusCode: 524, error: message, url: targetUrl.href });
+      logger.warn(`[crawl] ${message} for ${targetUrl.href}`);
       return res.status(524).json({ error: message });
     }
 
     if (verificationResult.waitedMs > 0) {
-      console.log(
-        chalk.cyan(
-          `[crawl] Cleared verification challenge in ${verificationResult.waitedMs}ms for ${targetUrl.href}`,
-        ),
+      logger.info(
+        `[crawl] Cleared verification challenge in ${verificationResult.waitedMs}ms for ${targetUrl.href}`,
       );
       try {
         await page.waitForNetworkIdle({ timeout: 10000 });
@@ -325,14 +487,16 @@ app.get('/crawl', async (req, res) => {
     const upstreamError =
       upstreamStatus >= 400 ? `Upstream responded with status ${upstreamStatus}` : undefined;
 
-    recordCrawlResult({ statusCode: expressStatus, error: upstreamError });
+    recordCrawlResult({ statusCode: expressStatus, error: upstreamError, url: targetUrl.href });
 
-    const statusLabel = upstreamError ? chalk.yellow('[crawl]') : chalk.green('[crawl]');
-    console.log(
-      `${statusLabel} ${targetUrl.href} -> ${upstreamStatus} (${headers['content-type'] ?? 'unknown content-type'})`,
-    );
+    const crawlMessage = `[crawl] ${targetUrl.href} -> ${upstreamStatus} (${headers['content-type'] ?? 'unknown content-type'})`;
+    if (upstreamError) {
+      logger.warn(crawlMessage);
+    } else {
+      logger.info(crawlMessage);
+    }
 
-    res.status(expressStatus).json({
+    const responsePayload = {
       headers: {
         statusCode: upstreamStatus ?? null,
         'content-encoding': headers['content-encoding'] ?? null,
@@ -341,62 +505,40 @@ app.get('/crawl', async (req, res) => {
         expires: headers.expires ?? null,
       },
       metadata,
-      // body: htmlForMarkdown,
       hash,
       markdown,
-    });
+    };
+
+    if (INCLUDE_HTML_RESPONSE || includeFullMarkdown) {
+      responsePayload.body = htmlForMarkdown;
+    }
+
+    res.status(expressStatus).json(responsePayload);
   } catch (err) {
     const message = formatError(err);
-    recordCrawlResult({ statusCode: 500, error: message });
-    console.error(
-      chalk.red(`[crawl] Failed to crawl ${targetUrl?.href ?? url}: ${message}`),
-    );
+    recordCrawlResult({ statusCode: 500, error: message, url: targetUrl?.href ?? url });
+    logger.error(`[crawl] Failed to crawl ${targetUrl?.href ?? url}: ${message}`);
     res.status(500).json({ error: 'Failed to crawl URL', details: message });
   } finally {
     if (browser) {
       await browser.close().catch(() => {});
     }
+    refreshSpinner({ status: 'ready' });
   }
 });
 
-const PORT = process.env.PORT || 8080;
-const startupSpinner = ora('Starting flashcrawl API server').start();
-
 const server = app.listen(PORT, () => {
-  startupSpinner.succeed(chalk.green(`flashcrawl API running on port ${PORT}`));
+  refreshSpinner({ status: 'ready' });
   startWatchdog();
-  console.log(chalk.blue('Status endpoint   : GET /status'));
-  console.log(chalk.blue('Health check      : GET /'));
-  console.log(chalk.blue('Crawl endpoint    : GET /crawl?url=<target>&fullMarkdown=true|false'));
+  logger.info(`flashcrawl API running on port ${PORT}`);
+  logger.info('Status endpoint   : GET /status');
+  logger.info('Crawl endpoint    : GET /crawl?url=<target>&fullMarkdown=true|false');
+  logger.info('PDF convert       : POST /convert');
+  refreshSpinner();
 });
 
 server.on('error', (err) => {
-  startupSpinner.fail(chalk.red('Failed to start flashcrawl API server'));
+  statusSpinner?.fail(chalk.red('Failed to start flashcrawl API server'));
   handleFatalError('server-start', err);
   process.exitCode = 1;
 });
-const waitForHumanVerification = async (page) => {
-  const start = Date.now();
-
-  while (Date.now() - start < HUMAN_VERIFICATION_TIMEOUT_MS) {
-    try {
-      const challengeText = await page.evaluate(
-        () => document.body?.innerText || '',
-      );
-
-      const hasChallenge = HUMAN_VERIFICATION_PATTERNS.some((pattern) =>
-        pattern.test(challengeText),
-      );
-
-      if (!hasChallenge) {
-        return { cleared: true, waitedMs: Date.now() - start };
-      }
-    } catch (err) {
-      // Ignore transient evaluation errors due to navigation/reloads.
-    }
-
-    await page.waitForTimeout(HUMAN_VERIFICATION_CHECK_INTERVAL_MS);
-  }
-
-  return { cleared: false, waitedMs: Date.now() - start };
-};
