@@ -24,6 +24,7 @@ const __dirname = path.dirname(__filename);
 const LOG_DIR = process.env.LOG_DIR ?? path.join(__dirname, 'logs');
 const LOG_TO_CONSOLE = process.env.ENABLE_CONSOLE_LOG !== 'false';
 const INCLUDE_HTML_RESPONSE = (process.env.CRAWL_INCLUDE_HTML ?? 'true').toLowerCase() !== 'false';
+const SANITIZE_HTML = (process.env.CRAWL_SANITIZE_HTML ?? 'true').toLowerCase() !== 'false';
 const ENV_PORT = Number(process.env.PORT);
 const PORT = Number.isFinite(ENV_PORT) && ENV_PORT > 0 ? ENV_PORT : 8080;
 
@@ -104,8 +105,8 @@ const formatStatusLabel = (status) => {
 const formatStatsText = () => {
   const totalOps = statusNotes.totalCrawls + statusNotes.pdfAttempts;
   const totalText = chalk.blue(`total ${totalOps}`);
-  const htmlText = chalk.green(`html ${statusNotes.totalCrawls}`);
-  const pdfText = chalk.magenta(`pdf ${statusNotes.pdfAttempts}`);
+  const htmlText = chalk.white(`html ${statusNotes.totalCrawls}`);
+  const pdfText = chalk.white(`pdf ${statusNotes.pdfAttempts}`);
   const failedCount = statusNotes.failedCrawls + statusNotes.pdfConversionFailures;
   const failedText = chalk.red(`failed ${failedCount}`);
   return `${totalText} | ${htmlText} | ${pdfText} | ${failedText}`;
@@ -281,6 +282,13 @@ const startWatchdog = () => {
   watchdogTimer.unref?.();
 };
 
+const stopWatchdog = () => {
+  if (watchdogTimer) {
+    clearInterval(watchdogTimer);
+    watchdogTimer = undefined;
+  }
+};
+
 const handleFatalError = (label, err) => {
   const message = formatError(err);
   logger.error(`[${label}] ${message}`);
@@ -337,7 +345,7 @@ app.post('/convert', upload.single('file'), async (req, res) => {
 
 // Lightweight crawler that returns page-level metadata
 app.get('/crawl', async (req, res) => {
-  const { url, fullMarkdown } = req.query;
+  const { url } = req.query;
 
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ error: 'Missing url query parameter' });
@@ -464,13 +472,9 @@ app.get('/crawl', async (req, res) => {
     }
 
     const fullHtml = await page.content();
-    const includeFullMarkdown =
-      typeof fullMarkdown === 'string' &&
-      ['1', 'true', 'yes', 'full'].includes(fullMarkdown.toLowerCase());
-
     let htmlForMarkdown = fullHtml;
 
-    if (!includeFullMarkdown) {
+    if (SANITIZE_HTML) {
       htmlForMarkdown = await page.evaluate((selectors) => {
         selectors.forEach((selector) => {
           document.querySelectorAll(selector).forEach((el) => el.remove());
@@ -509,7 +513,7 @@ app.get('/crawl', async (req, res) => {
       markdown,
     };
 
-    if (INCLUDE_HTML_RESPONSE || includeFullMarkdown) {
+    if (INCLUDE_HTML_RESPONSE) {
       responsePayload.body = htmlForMarkdown;
     }
 
@@ -527,18 +531,47 @@ app.get('/crawl', async (req, res) => {
   }
 });
 
-const server = app.listen(PORT, () => {
-  refreshSpinner({ status: 'ready' });
-  startWatchdog();
-  logger.info(`flashcrawl API running on port ${PORT}`);
-  logger.info('Status endpoint   : GET /status');
-  logger.info('Crawl endpoint    : GET /crawl?url=<target>&fullMarkdown=true|false');
-  logger.info('PDF convert       : POST /convert');
-  refreshSpinner();
-});
+let serverInstance;
 
-server.on('error', (err) => {
-  statusSpinner?.fail(chalk.red('Failed to start flashcrawl API server'));
-  handleFatalError('server-start', err);
-  process.exitCode = 1;
-});
+const startServer = (port = PORT) => {
+  if (serverInstance) {
+    return serverInstance;
+  }
+
+  serverInstance = app.listen(port, () => {
+    refreshSpinner({ status: 'ready' });
+    startWatchdog();
+    logger.info(`flashcrawl API running on port ${port}`);
+    refreshSpinner();
+  });
+
+  serverInstance.on('error', (err) => {
+    statusSpinner?.fail(chalk.red('Failed to start flashcrawl API server'));
+    handleFatalError('server-start', err);
+    process.exitCode = 1;
+  });
+
+  return serverInstance;
+};
+
+const stopServer = async () => {
+  if (!serverInstance) {
+    return;
+  }
+
+  await new Promise((resolve, reject) => {
+    serverInstance.close((err) => {
+      if (err) reject(err);
+      else resolve();
+    });
+  });
+
+  stopWatchdog();
+  serverInstance = undefined;
+};
+
+if (process.env.NODE_ENV !== 'test') {
+  startServer();
+}
+
+export { app, startServer, stopServer };
