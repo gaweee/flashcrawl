@@ -3,7 +3,7 @@
 flashcrawl is a lightweight Puppeteer-backed crawler that captures metadata, HTML, and Markdown from public web pages. It is designed to plug into workflows such as n8n while remaining easy to operate and monitor.
 
 ## Features
-- `/crawl` endpoint that fetches a URL, follows up to five redirects, and returns structured headers, metadata, optional raw HTML, Markdown, and a SHA-256 hash of the Markdown. PDFs are auto-detected and converted to Markdown transparently.
+- `/crawl` endpoint that fetches a URL, follows up to five redirects, and returns structured headers, metadata, optional raw HTML, Markdown, and a SHA-256 hash of the Markdown. For PDFs the crawler stores a copy in `./tmp` (relative to the app) and reports the saved file path and size rather than attempting inline conversion.
 - Content hygiene: scripts, styles, and other non-content tags are stripped before Markdown conversion by default. Toggling sanitation and HTML inclusion is controlled via environment variables.
 - `/status` endpoint exposes uptime, crawl counters, and the latest watchdog observations.
 - Watchdog timer warns about event-loop stalls; console output is prettified with `chalk` and `ora` for quick status notes.
@@ -14,6 +14,7 @@ flashcrawl is a lightweight Puppeteer-backed crawler that captures metadata, HTM
    ```sh
    npm install
    ```
+   (Playwright manages its own browser binaries. If the bundled Chromium is missing, run `npx playwright install chromium`.)
 2. Run the server:
    ```sh
    node server.js
@@ -59,10 +60,16 @@ You can configure behaviour through a `.env` file:
   },
   "body": "<!DOCTYPE html><html>...</html>",
   "hash": "abc123def456ghi789jkl012mno345pq",
-  "markdown": "# Page Title"
+  "markdown": "# Page Title",
+  "pdf": {
+    "saved": false,
+    "path": null,
+    "size": 0,
+    "error": null
+  }
 }
 ```
-When the target responds with a PDF, `metadata.body` stays `null` and heading details remain empty, but the Markdown and hash fields are still populated.
+When the target responds with a PDF, `metadata.body` stays `null`, heading details remain empty, and the `pdf` object summarises where the file was stored. The `markdown` field is simply the byte size (e.g. `"12345 bytes"`), and `hash` is calculated from the raw PDF buffer.
 
 ## Notes
 - Requires Node.js ≥ 18.
