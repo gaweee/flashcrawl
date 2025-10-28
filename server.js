@@ -1,9 +1,20 @@
-import { app } from './src/app.js';
+import express from 'express';
+import { handleCrawl } from './src/services/crawlService.js';
 import { config } from './src/config.js';
 import { logger } from './src/logger.js';
 import { statusTracker } from './src/statusTracker.js';
 import { startWatchdog, stopWatchdog } from './src/watchdog.js';
-import './src/errorHandling.js';
+import { registerErrorHandlers } from './src/errors.js';
+
+const app = express();
+
+app.get('/status', (_req, res) => {
+  res.json(statusTracker.getSnapshot());
+});
+
+app.get('/crawl', handleCrawl);
+
+registerErrorHandlers();
 
 let serverInstance;
 

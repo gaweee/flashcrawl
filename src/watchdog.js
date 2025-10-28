@@ -2,6 +2,7 @@ import { performance } from 'perf_hooks';
 import { logger } from './logger.js';
 import { statusTracker } from './statusTracker.js';
 import { constants } from './config.js';
+import { formatError } from './errors.js';
 
 let watchdogTimer;
 

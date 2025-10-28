@@ -35,9 +35,8 @@ describe('flashcrawl API basics', () => {
     expect(res.body).toHaveProperty('error', 'Invalid URL');
   });
 
-  it('rejects PDF conversions without a file', async () => {
+  it('does not expose the legacy /convert endpoint', async () => {
     const res = await request(app).post('/convert');
-    expect(res.status).toBe(400);
-    expect(res.body).toHaveProperty('error', 'No file provided');
+    expect(res.status).toBe(404);
   });
 });

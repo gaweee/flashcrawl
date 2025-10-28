@@ -2,10 +2,11 @@ import puppeteer from 'puppeteer';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
 import { createHash } from 'crypto';
+import pdf2md from '@opendocsg/pdf2md';
 import { logger } from '../logger.js';
 import { statusTracker } from '../statusTracker.js';
 import { config, constants } from '../config.js';
-import { formatError } from '../utils/errors.js';
+import { formatError } from '../errors.js';
 
 const turndown = new TurndownService({ codeBlockStyle: 'fenced' });
 turndown.use(gfm);
@@ -77,6 +78,7 @@ const waitForHumanVerification = async (page) => {
 
 const handleCrawl = async (req, res) => {
   const { url } = req.query;
+  const startTime = Date.now();
 
   if (!url || typeof url !== 'string') {
     return res.status(400).json({ error: 'Missing url query parameter' });
@@ -94,6 +96,7 @@ const handleCrawl = async (req, res) => {
   }
 
   let browser;
+  let processedAsPdf = false;
 
   try {
     statusTracker.refreshSpinner({ status: 'active', url: targetUrl.href });
@@ -141,8 +144,9 @@ const handleCrawl = async (req, res) => {
       if (redirectLimitExceeded) {
         const message = `Exceeded redirect limit of ${constants.MAX_REDIRECTS}`;
         statusTracker.recordCrawlResult({ statusCode: 310, error: message, url: targetUrl.href });
+        const duration = Date.now() - startTime;
         logger.warn(
-          `[crawl] ${message}. Observed ${redirectCountObserved} redirects while fetching ${targetUrl.href}`,
+          `[crawl] ${message}. Observed ${redirectCountObserved} redirects while fetching ${targetUrl.href} in ${duration}ms`,
         );
         return res.status(310).json({
           error: message,
@@ -162,64 +166,86 @@ const handleCrawl = async (req, res) => {
     if (!response) {
       const message = 'No response received from target URL';
       statusTracker.recordCrawlResult({ statusCode: 502, error: message, url: targetUrl.href });
-      logger.warn(`[crawl] ${message}: ${targetUrl.href}`);
+      const duration = Date.now() - startTime;
+      logger.warn(`[crawl] ${message}: ${targetUrl.href} in ${duration}ms`);
       return res.status(502).json({ error: message });
     }
 
-    const metadata = await page.evaluate(() => {
-      const getMeta = (name) =>
-        document.querySelector(`meta[name="${name}"]`)?.getAttribute('content') ??
-        document.querySelector(`meta[property="${name}"]`)?.getAttribute('content') ??
-        null;
-
-      const cleanTextArray = (selector) =>
-        Array.from(document.querySelectorAll(selector))
-          .map((el) => el.textContent?.trim())
-          .filter((text) => Boolean(text));
-
-      return {
-        title: document.title || null,
-        description: getMeta('description'),
-        h1: cleanTextArray('h1'),
-        h2: cleanTextArray('h2'),
-      };
-    });
-
-    const verificationResult = await waitForHumanVerification(page);
-
-    if (!verificationResult.cleared) {
-      const message = `Verification challenge did not clear within ${constants.HUMAN_VERIFICATION_TIMEOUT_MS}ms`;
-      statusTracker.recordCrawlResult({ statusCode: 524, error: message, url: targetUrl.href });
-      logger.warn(`[crawl] ${message} for ${targetUrl.href}`);
-      return res.status(524).json({ error: message });
-    }
-
-    if (verificationResult.waitedMs > 0) {
-      logger.info(
-        `[crawl] Cleared verification challenge in ${verificationResult.waitedMs}ms for ${targetUrl.href}`,
-      );
-      try {
-        await page.waitForNetworkIdle({ timeout: 10000 });
-      } catch {
-        // Ignore timeout; page may still be loading async assets.
-      }
-    }
-
-    const fullHtml = await page.content();
-    let htmlForMarkdown = fullHtml;
-
-    if (config.sanitizeHtml) {
-      htmlForMarkdown = await page.evaluate((selectors) => {
-        selectors.forEach((selector) => {
-          document.querySelectorAll(selector).forEach((el) => el.remove());
-        });
-        return '<!DOCTYPE html>' + document.documentElement.outerHTML;
-      }, STRIP_SELECTORS);
-    }
-
-    const markdown = turndown.turndown(htmlForMarkdown);
-    const hash = createHash('sha256').update(markdown).digest('hex');
     const headers = response?.headers() ?? {};
+    const contentType = headers['content-type'] ?? '';
+    processedAsPdf = /application\/pdf/i.test(contentType);
+
+    let metadata = {
+      title: null,
+      description: null,
+      h1: [],
+      h2: [],
+    };
+    let markdown;
+    let hash;
+    let htmlForMarkdown = null;
+
+    if (processedAsPdf) {
+      const pdfBuffer = await response.buffer();
+      markdown = await pdf2md(pdfBuffer, {});
+      hash = createHash('sha256').update(markdown).digest('hex');
+      statusTracker.recordPdfConversion({ statusCode: 200 });
+    } else {
+      metadata = await page.evaluate(() => {
+        const getMeta = (name) =>
+          document.querySelector(`meta[name="${name}"]`)?.getAttribute('content') ??
+          document.querySelector(`meta[property="${name}"]`)?.getAttribute('content') ??
+          null;
+
+        const cleanTextArray = (selector) =>
+          Array.from(document.querySelectorAll(selector))
+            .map((el) => el.textContent?.trim())
+            .filter((text) => Boolean(text));
+
+        return {
+          title: document.title || null,
+          description: getMeta('description'),
+          h1: cleanTextArray('h1'),
+          h2: cleanTextArray('h2'),
+        };
+      });
+
+      const verificationResult = await waitForHumanVerification(page);
+
+      if (!verificationResult.cleared) {
+        const message = `Verification challenge did not clear within ${constants.HUMAN_VERIFICATION_TIMEOUT_MS}ms`;
+        statusTracker.recordCrawlResult({ statusCode: 524, error: message, url: targetUrl.href });
+        const durationVerif = Date.now() - startTime;
+        logger.warn(`[crawl] ${message} for ${targetUrl.href} in ${durationVerif}ms`);
+        return res.status(524).json({ error: message });
+      }
+
+      if (verificationResult.waitedMs > 0) {
+        logger.info(
+          `[crawl] Cleared verification challenge in ${verificationResult.waitedMs}ms for ${targetUrl.href}`,
+        );
+        try {
+          await page.waitForNetworkIdle({ timeout: 10000 });
+        } catch {
+          // Ignore timeout; page may still be loading async assets.
+        }
+      }
+
+      htmlForMarkdown = await page.content();
+
+      if (config.sanitizeHtml) {
+        htmlForMarkdown = await page.evaluate((selectors) => {
+          selectors.forEach((selector) => {
+            document.querySelectorAll(selector).forEach((el) => el.remove());
+          });
+          return '<!DOCTYPE html>' + document.documentElement.outerHTML;
+        }, STRIP_SELECTORS);
+      }
+
+      markdown = turndown.turndown(htmlForMarkdown);
+      hash = createHash('sha256').update(markdown).digest('hex');
+    }
+
     const upstreamStatus = response.status();
     const expressStatus = upstreamStatus >= 400 ? upstreamStatus : 200;
     const upstreamError =
@@ -227,7 +253,10 @@ const handleCrawl = async (req, res) => {
 
     statusTracker.recordCrawlResult({ statusCode: expressStatus, error: upstreamError, url: targetUrl.href });
 
-    const crawlMessage = `[crawl] ${targetUrl.href} -> ${upstreamStatus} (${headers['content-type'] ?? 'unknown content-type'})`;
+    const duration = Date.now() - startTime;
+    const crawlMessage = `[crawl] ${targetUrl.href} -> ${upstreamStatus} (${
+      headers['content-type'] ?? 'unknown content-type'
+    }) in ${duration}ms${processedAsPdf ? ' [pdf]' : ''}`;
     if (upstreamError) {
       logger.warn(crawlMessage);
     } else {
@@ -247,7 +276,9 @@ const handleCrawl = async (req, res) => {
       markdown,
     };
 
-    if (config.includeHtml) {
+    if (processedAsPdf) {
+      responsePayload.body = null;
+    } else if (config.includeHtml) {
       responsePayload.body = htmlForMarkdown;
     }
 
@@ -255,8 +286,12 @@ const handleCrawl = async (req, res) => {
   } catch (err) {
     const message = formatError(err);
     const finalUrl = targetUrl?.href ?? url;
+    const duration = Date.now() - startTime;
+    if (processedAsPdf) {
+      statusTracker.recordPdfConversion({ statusCode: 500, error: message });
+    }
     statusTracker.recordCrawlResult({ statusCode: 500, error: message, url: finalUrl });
-    logger.error(`[crawl] Failed to crawl ${finalUrl}: ${message}`);
+    logger.error(`[crawl] Failed to crawl ${finalUrl}: ${message} (in ${duration}ms)`);
     res.status(500).json({ error: 'Failed to crawl URL', details: message });
   } finally {
     if (browser) {
