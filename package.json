@@ -1,0 +1,25 @@
+{
+  "name": "pdf2md-api",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "@opendocsg/pdf2md": "^0.2.2",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "puppeteer": "^22.8.0",
+    "turndown": "^7.2.0",
+    "turndown-plugin-gfm": "^1.0.2",
+    "chalk": "^5.3.0",
+    "ora": "^8.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0",
+    "minimatch": "^9.0.5",
+    "brace-expansion": "^2.0.1",
+    "concat-map": "^0.0.1"
+  }
+}
