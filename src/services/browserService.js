@@ -1,11 +1,11 @@
 import fs from 'fs';
 import { chromium } from 'rebrowser-playwright';
-import { logger } from '../logger.js';
-import { formatError } from '../errors.js';
+import { logger } from '../utils/logger.js';
+import { formatError } from '../utils/errors.js';
 import { config, constants } from '../config.js';
 import { processHtml, handleRequest as htmlHandle } from './htmlHandler.js';
 import { handleRequest as pdfHandle } from './pdfHandler.js';
-import { statusTracker } from '../statusTracker.js';
+import { statusTracker } from '../utils/statusTracker.js';
 
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 

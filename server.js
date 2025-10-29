@@ -1,9 +1,9 @@
 import express from 'express';
 import { handleCrawl } from './src/services/browserService.js';
 import { config } from './src/config.js';
-import { logger } from './src/logger.js';
-import { statusTracker } from './src/statusTracker.js';
-import { registerErrorHandlers } from './src/errors.js';
+import { logger } from './src/utils/logger.js';
+import { statusTracker } from './src/utils/statusTracker.js';
+import { registerErrorHandlers } from './src/utils/errors.js';
 
 const app = express();
 

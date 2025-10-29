@@ -1,9 +1,9 @@
 import fs from 'fs';
 import { chromium } from 'rebrowser-playwright';
 import { createHash } from 'crypto';
-import { logger } from '../logger.js';
+import { logger } from '../utils/logger.js';
 import { config, constants } from '../config.js';
-import { formatError } from '../errors.js';
+import { formatError } from '../utils/errors.js';
 import { fetchAndProcessPdf, fetchPdf, processPdfBuffer } from './pdfHandler.js';
 import { processHtml } from './htmlHandler.js';
 

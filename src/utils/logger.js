@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import winston from 'winston';
-import { config } from './config.js';
+import { config } from '../config.js';
 
 if (!fs.existsSync(config.logDir)) {
   fs.mkdirSync(config.logDir, { recursive: true });
