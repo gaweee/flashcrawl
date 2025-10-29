@@ -439,6 +439,7 @@ const handleCrawl = async (req, res) => {
         expires: headers.expires ?? null,
       },
       metadata,
+      url,
       hash,
       markdown,
     };
