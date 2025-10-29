@@ -11,8 +11,7 @@ const envPort = Number(process.env.PORT);
 const config = {
   projectRoot,
   logDir: process.env.LOG_DIR ?? path.join(projectRoot, 'logs'),
-  enableConsoleLog: process.env.ENABLE_CONSOLE_LOG !== 'false',
-  includeHtml: (process.env.CRAWL_INCLUDE_HTML ?? 'true').toLowerCase() !== 'false',
+  enableConsoleLog: (process.env.ENABLE_CONSOLE_LOG ?? 'false').toLowerCase() === 'true',
   sanitizeHtml: (process.env.CRAWL_SANITIZE_HTML ?? 'true').toLowerCase() !== 'false',
   port: Number.isFinite(envPort) && envPort > 0 ? envPort : 8080,
 };
@@ -24,6 +23,8 @@ const constants = Object.freeze({
   DEFAULT_NAV_TIMEOUT_MS: 45000,
   HUMAN_VERIFICATION_TIMEOUT_MS: 45000,
   HUMAN_VERIFICATION_CHECK_INTERVAL_MS: 2000,
+  CHALLENGE_MAX_REFRESHES: 2,
+  NAVIGATION_RETRY_TIMEOUT_MS: 60000,
 });
 
 export { config, constants };

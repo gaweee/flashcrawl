@@ -1,12 +1,12 @@
 # flashcrawl
 
-flashcrawl is a lightweight Puppeteer-backed crawler that captures metadata, HTML, and Markdown from public web pages. It is designed to plug into workflows such as n8n while remaining easy to operate and monitor.
+flashcrawl is a lightweight crawler built on top of rebrowser-playwright (Playwright with stealth hardening) that captures metadata, HTML, and Markdown from public web pages. It is designed to plug into workflows such as n8n while remaining easy to operate and monitor.
 
 ## Features
-- `/crawl` endpoint that fetches a URL, follows up to five redirects, and returns structured headers, metadata, optional raw HTML, Markdown, and a SHA-256 hash of the Markdown. For PDFs the crawler stores a copy in `./tmp` (relative to the app) and reports the saved file path and size rather than attempting inline conversion.
-- Content hygiene: scripts, styles, and other non-content tags are stripped before Markdown conversion by default. Toggling sanitation and HTML inclusion is controlled via environment variables.
+- `/crawl` endpoint that fetches a URL, follows up to five redirects, and returns structured headers, metadata, Markdown, and a SHA-256 hash of the Markdown. HTML pages are converted with Turndown; PDFs are downloaded to `./tmp` and analysed with `@opendocsg/pdf2md` before hashing.
+- Content hygiene: scripts, styles, and other non-content tags are stripped before Markdown conversion by default. Sanitisation can be toggled via environment variables when needed.
 - `/status` endpoint exposes uptime, crawl counters, and the latest watchdog observations.
-- Watchdog timer warns about event-loop stalls; console output is prettified with `chalk` and `ora` for quick status notes.
+- Watchdog timer warns about event-loop stalls; optional console output (when enabled) is prettified with `chalk` and `ora` for quick status notes.
 - Winston logger writes timestamped log files to the `logs/` directory (one file per day) and can also mirror output to the console.
 
 ## Getting Started
@@ -14,7 +14,7 @@ flashcrawl is a lightweight Puppeteer-backed crawler that captures metadata, HTM
    ```sh
    npm install
    ```
-   (Playwright manages its own browser binaries. If the bundled Chromium is missing, run `npx playwright install chromium`.)
+   (Rebrowser Playwright manages its own browser binaries. If the bundled Chromium is missing, run `npx rebrowser-playwright install chromium --with-deps`).
 2. Run the server:
    ```sh
    node server.js
@@ -36,10 +36,11 @@ You can configure behaviour through a `.env` file:
 | Variable | Description | Default |
 | --- | --- | --- |
 | `PORT` | Port for the HTTP server. | `8080` |
-| `ENABLE_CONSOLE_LOG` | Set to `false` to disable console logging (file logging continues). | `true` |
-| `CRAWL_INCLUDE_HTML` | Set to `false` to omit the `body` field in crawl responses. | `true` |
+| `ENABLE_CONSOLE_LOG` | Set to `true` to mirror logs to the console (file logging continues otherwise). | `false` |
 | `CRAWL_SANITIZE_HTML` | Set to `false` to skip stripping scripts/styles before Markdown conversion. | `true` |
 | `LOG_DIR` | Override the directory used for log files. | `<project>/logs` |
+| `CRAWL_SESSION_COOKIE` | Optional cookie string to attach to outbound requests (useful for sites requiring pre-auth). | unset |
+| `PLAYWRIGHT_CHROMIUM_EXECUTABLE` | Path to an existing Chrome/Chromium binary if you prefer not to install Playwright’s bundle. | unset |
 
 ## Response Shape
 `/crawl` returns:
@@ -49,7 +50,6 @@ You can configure behaviour through a `.env` file:
     "statusCode": 200,
     "content-encoding": null,
     "content-type": "text/html; charset=utf-8",
-    "content-length": 51558,
     "expires": "Sun, 02 Nov 2025 00:35:10 GMT"
   },
   "metadata": {
@@ -58,20 +58,13 @@ You can configure behaviour through a `.env` file:
     "h1": ["Top Level Heading"],
     "h2": ["Subheading"]
   },
-  "body": "<!DOCTYPE html><html>...</html>",
   "hash": "abc123def456ghi789jkl012mno345pq",
-  "markdown": "# Page Title",
-  "pdf": {
-    "saved": false,
-    "path": null,
-    "size": 0,
-    "error": null
-  }
+  "markdown": "# PDF Title\n\n- Item one\n- Item two"
 }
 ```
-When the target responds with a PDF, `metadata.body` stays `null`, heading details remain empty, and the `pdf` object summarises where the file was stored. The `markdown` field is simply the byte size (e.g. `"12345 bytes"`), and `hash` is calculated from the raw PDF buffer.
+When the target responds with a PDF, the raw file is saved to `./tmp`, converted to Markdown with `@opendocsg/pdf2md`, and hashed based on that Markdown content.
 
 ## Notes
 - Requires Node.js ≥ 18.
-- Puppeteer runs headless Chrome with `--no-sandbox` flags so it can operate in minimal container environments.
+- Rebrowser Playwright runs headless Chromium by default and manages its own browser binaries.
 - Watchdog warnings and crawl summaries are handled by Winston; if console logging is disabled they remain available in the daily log files.

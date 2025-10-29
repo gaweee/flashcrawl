@@ -1,6 +1,5 @@
 import chalk from 'chalk';
 import ora from 'ora';
-import { config } from './config.js';
 
 const statusNotes = {
   startTime: Date.now(),
@@ -24,7 +23,7 @@ const spinnerState = {
   lastUrl: '—',
 };
 
-const statusSpinner = config.enableConsoleLog ? ora({ spinner: 'dots', color: 'cyan' }) : null;
+const statusSpinner = process.stdout.isTTY ? ora({ spinner: 'dots', color: 'cyan' }) : null;
 
 const STATUS_COLORS = {
   'starting up': chalk.yellow,

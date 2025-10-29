@@ -26,7 +26,6 @@ const startServer = (port = config.port) => {
   serverInstance = app.listen(port, () => {
     statusTracker.refreshSpinner({ status: 'ready' });
     startWatchdog();
-    logger.info(`flashcrawl API running on port ${port}`);
     statusTracker.refreshSpinner();
   });
 
