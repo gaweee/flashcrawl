@@ -29,10 +29,11 @@ export async function processPdfBuffer(buffer, url) {
   const markdown = await convertPdfBufferToMarkdown(buffer);
   const hash = createHash('sha256').update(markdown).digest('hex');
   return {
-    markdown,
+    url,
     hash,
-    headers: { 'content-type': 'application/pdf' },
-    metadata: { title: null, description: null, h1: [], h2: [] }
+    headers: { 'content-type': 'application/pdf', status: 200 },
+    metadata: {  },
+    markdown
   };
 }
 

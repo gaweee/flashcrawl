@@ -5,17 +5,18 @@ import { config } from '../utils/config.js';
 /**
  * Process an HTML page and return markdown, metadata and headers
  */
-export async function processHtml(page, response) {
+export async function processHtml(page, response, url) {
   const { markdown, metadata } = await extractHtmlContent(page, { sanitize: config.sanitizeHtml });
   const hash = createHash('sha256').update(markdown).digest('hex');
   return {
-    markdown,
-    metadata: metadata ?? { title: null, description: null, h1: [], h2: [] },
+    url,
     hash,
     headers: {
       'content-type': response.headers()['content-type'] || 'text/html',
       status: response.status()
-    }
+    },
+    metadata: metadata ?? { title: null, description: null, h1: [], h2: [] },
+    markdown,
   };
 }
 
@@ -34,7 +35,7 @@ export async function handleRequest({ context, page = null, response = null, url
     }
 
     if (!response) throw new Error('No response from page');
-    return await processHtml(page, response);
+    return await processHtml(page, response, url);
   } finally {
     if (created && page) await page.close().catch(() => {});
   }
