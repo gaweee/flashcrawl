@@ -18,14 +18,14 @@ const spinnerState = {
 const statusSpinner = process.stdout.isTTY ? ora({ spinner: 'dots', color: 'cyan' }) : null;
 
 const STATUS_COLORS = {
-  ready: chalk.green,
-  active: chalk.blue,
-  'starting up': chalk.yellow,
+  ready: chalk.bgGreen,
+  active: chalk.bgBlue,
+  'starting up': chalk.bgYellow,
 };
 
 const formatStatusLabel = (status) => {
   const colorizer = STATUS_COLORS[status] ?? chalk.white;
-  return colorizer(`[${status}]`);
+  return colorizer(` ${status} `);
 };
 
 const truncate = (s, max = 80) => {
@@ -55,12 +55,13 @@ const refreshSpinner = ({ status, url, archived = false } = {}) => {
   const statusLabel = formatStatusLabel(spinnerState.status);
   const rawUrl = spinnerState.lastUrl || '—';
   const display = truncate(rawUrl, 72);
-  const urlText = spinnerState.archived ? chalk.dim(display) : chalk.gray(display);
+  const urlText = spinnerState.archived ? chalk.gray(display) : chalk.white(display);
 
   // show success/total as right-hand info
   const counts = `${chalk.green(String(successfulCrawls))}/${String(totalCrawls)}`;
 
-  statusSpinner.text = `${statusLabel} ${urlText}    ${counts}`;
+  // format line
+  statusSpinner.text = `${statusLabel} ${counts}   →   ${urlText}    `;
   if (!statusSpinner.isSpinning) statusSpinner.start();
   // force immediate render so the spinner text updates promptly
   try { statusSpinner.render(); } catch (_) {}
@@ -73,25 +74,11 @@ const stopSpinner = () => {
 const incrementTotal = (n = 1) => { totalCrawls += n; };
 const incrementSuccess = (n = 1) => { successfulCrawls += n; };
 
-const getUptimeSeconds = () => Math.round((Date.now() - _startTime) / 1000);
-
-const getSnapshot = () => ({
-  uptimeSeconds: getUptimeSeconds(),
-  totalCrawls,
-  successfulCrawls,
-  failedCrawls: Math.max(0, totalCrawls - successfulCrawls),
-  spinnerStatus: spinnerState.status,
-  lastUrl: spinnerState.lastUrl,
-  history: history.slice(),
-});
-
 const statusTracker = {
   refreshSpinner,
   stopSpinner,
   incrementTotal,
   incrementSuccess,
-  getSnapshot,
-  getUptimeSeconds,
 };
 
 // initialize as ready so the spinner doesn't show "starting up" after init
