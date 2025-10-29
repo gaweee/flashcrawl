@@ -1,17 +1,11 @@
 import fs from 'fs';
-import path from 'path';
 import { chromium } from 'rebrowser-playwright';
-import TurndownService from 'turndown';
-import { gfm } from 'turndown-plugin-gfm';
-import { createHash, randomUUID } from 'crypto';
-import pdf2md from '@opendocsg/pdf2md';
+import { createHash } from 'crypto';
 import { logger } from '../logger.js';
 import { statusTracker } from '../statusTracker.js';
 import { config, constants } from '../config.js';
 import { formatError } from '../errors.js';
-
-const turndown = new TurndownService({ codeBlockStyle: 'fenced' });
-turndown.use(gfm);
+import { extractHtmlContent, convertPdfBufferToMarkdown } from '../utils/markdown.js';
 
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
@@ -31,66 +25,10 @@ const EXTRA_HEADERS = {
   'upgrade-insecure-requests': '1',
 }; 
 
-const HUMAN_VERIFICATION_PATTERNS = [
-  /verify(?:ing)? you are human/i,
-  /needs to review the security of your connection/i,
-  /checking your browser before accessing/i,
-  /press and hold/i,
-];
-
-const STRIP_SELECTORS = [
-  'script',
-  'style',
-  'link[rel="stylesheet"]',
-  'link[rel="preload"]',
-  'link[rel="prefetch"]',
-  'link[rel="dns-prefetch"]',
-  'noscript',
-  'iframe',
-  'canvas',
-  'svg',
-  'object',
-  'embed',
-  'template',
-  'meta[http-equiv="refresh"]',
-];
-
-const waitForHumanVerification = async (page) => {
-  const start = Date.now();
-
-  while (Date.now() - start < constants.HUMAN_VERIFICATION_TIMEOUT_MS) {
-    try {
-      const challengeText = await page.evaluate(() => document.body?.innerText || '');
-
-      const hasChallenge = HUMAN_VERIFICATION_PATTERNS.some((pattern) => pattern.test(challengeText));
-
-      if (!hasChallenge) {
-        return { cleared: true, waitedMs: Date.now() - start };
-      }
-    } catch {
-      // Ignore navigation-related evaluation issues.
-    }
-
-    await page.waitForTimeout(constants.HUMAN_VERIFICATION_CHECK_INTERVAL_MS);
-  }
-
-  return { cleared: false, waitedMs: Date.now() - start };
-};
-
 const buildCookieHeader = (cookies = []) =>
   cookies
     .map((cookie) => `${cookie.name}=${cookie.value}`)
     .join('; ');
-
-const ensureTmpDirExists = async () => {
-  const tmpDir = path.join(config.projectRoot, 'tmp');
-  try {
-    await fs.promises.access(tmpDir);
-  } catch {
-    await fs.promises.mkdir(tmpDir, { recursive: true });
-  }
-  return tmpDir;
-};
 
 const fetchPdfBuffer = async (context, response, targetUrl) => {
   if (response) {
@@ -250,6 +188,17 @@ const handleCrawl = async (req, res) => {
           finalUrl = page.url() || targetUrl.href;
           break;
         }
+        const message = navigationErr?.message ?? '';
+        const retriable =
+          /net::|Navigation timeout|ProtocolError|Target page, context or browser has been closed/i.test(message);
+        const hasAttemptsRemaining = navigationAttempts <= constants.CHALLENGE_MAX_REFRESHES;
+        if (retriable && hasAttemptsRemaining) {
+          logger.warn?.(
+            `[crawl] Navigation retry ${navigationAttempts} for ${finalUrl} due to error: ${formatError(navigationErr)}`,
+          );
+          await page.waitForTimeout(1500).catch(() => {});
+          continue;
+        }
         throw navigationErr;
       }
 
@@ -298,8 +247,6 @@ const handleCrawl = async (req, res) => {
       }
 
       let pdfBuffer;
-      let filePath;
-      let sizeBytes = 0;
       try {
         let pdfUrlString;
         try {
@@ -321,20 +268,14 @@ const handleCrawl = async (req, res) => {
           throw new Error('Empty PDF response');
         }
 
-        sizeBytes = pdfBuffer.length;
-        const tmpDir = await ensureTmpDirExists();
-        filePath = path.join(tmpDir, `flashcrawl-${Date.now()}-${randomUUID()}.pdf`);
-        await fs.promises.writeFile(filePath, pdfBuffer);
-
         headers = { 'content-type': 'application/pdf' };
 
-        const pdfMarkdown = await pdf2md(pdfBuffer, {});
-        markdown = pdfMarkdown;
-        hash = createHash('sha256').update(pdfMarkdown).digest('hex');
+        markdown = await convertPdfBufferToMarkdown(pdfBuffer);
+        hash = createHash('sha256').update(markdown).digest('hex');
         statusTracker.recordPdfConversion({ statusCode: 200 });
         pdfStatusRecorded = true;
         pdfConversionError = null;
-        logger.info(`[crawl] Saved PDF for ${targetUrl.href} -> ${filePath}`);
+        logger.info(`[crawl] Processed PDF for ${targetUrl.href}`);
       } catch (err) {
         pdfConversionError = formatError(err);
         markdown = '';
@@ -345,58 +286,12 @@ const handleCrawl = async (req, res) => {
         throw err;
       }
     } else {
-      metadata = await page.evaluate(() => {
-        const getMeta = (name) =>
-          document.querySelector(`meta[name="${name}"]`)?.getAttribute('content') ??
-          document.querySelector(`meta[property="${name}"]`)?.getAttribute('content') ??
-          null;
-
-        const cleanTextArray = (selector) =>
-          Array.from(document.querySelectorAll(selector))
-            .map((el) => el.textContent?.trim())
-            .filter((text) => Boolean(text));
-
-        return {
-          title: document.title || null,
-          description: getMeta('description'),
-          h1: cleanTextArray('h1'),
-          h2: cleanTextArray('h2'),
-        };
+      const { markdown: htmlMarkdown, metadata: extractedMetadata } = await extractHtmlContent(page, {
+        sanitize: config.sanitizeHtml,
       });
 
-      // const verificationResult = await waitForHumanVerification(page);
-
-      // if (!verificationResult.cleared) {
-      //   const message = `Verification challenge did not clear within ${constants.HUMAN_VERIFICATION_TIMEOUT_MS}ms`;
-      //   statusTracker.recordCrawlResult({ statusCode: 524, error: message, url: targetUrl.href });
-      //   logger.warn(`[crawl] ${message} for ${targetUrl.href}`);
-      //   return res.status(524).json({ error: message });
-      // }
-
-      // if (verificationResult.waitedMs > 0) {
-      //   logger.info(
-      //     `[crawl] Cleared verification challenge in ${verificationResult.waitedMs}ms for ${targetUrl.href}`,
-      //   );
-      //   try {
-      //     await page.waitForLoadState('networkidle', { timeout: 10000 });
-      //   } catch {
-      //     // Ignore timeout; page may still be loading async assets.
-      //   }
-      // }
-
-      const rawHtml = await page.content();
-
-      let htmlForMarkdown = rawHtml;
-      if (config.sanitizeHtml) {
-        htmlForMarkdown = await page.evaluate((selectors) => {
-          selectors.forEach((selector) => {
-            document.querySelectorAll(selector).forEach((el) => el.remove());
-          });
-          return '<!DOCTYPE html>' + document.documentElement.outerHTML;
-        }, STRIP_SELECTORS);
-      }
-
-      markdown = turndown.turndown(htmlForMarkdown);
+      metadata = extractedMetadata ?? metadata;
+      markdown = htmlMarkdown;
       hash = createHash('sha256').update(markdown).digest('hex');
       headers = {
         ...headers,
