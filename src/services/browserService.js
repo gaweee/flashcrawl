@@ -10,10 +10,12 @@ import { statusTracker } from '../utils/statusTracker.js';
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 
 
+logger.info(`[browserService] starting up`);
 // keep a warm, shared browser; if top-level await isn't available, change to: const sharedBrowserPromise = getBrowser();
 statusTracker.refreshSpinner({ status: 'starting up', url: '-', archived: false });
 let sharedBrowser = await getBrowser();
 statusTracker.refreshSpinner({ status: 'ready', url: '-', archived: false });
+logger.info(`[browserService] browser ready`);
 
 
 /**
@@ -23,6 +25,8 @@ statusTracker.refreshSpinner({ status: 'ready', url: '-', archived: false });
 async function handleCrawl(req, res) {
   const url = req.query.url?.trim();
   if (!url) return res.status(400).json({ error: 'Missing url query parameter' });
+
+  logger.info(`[browserService] received crawl request for ${url}`);
 
   // validate URL
   let targetUrl;
@@ -55,6 +59,7 @@ async function handleCrawl(req, res) {
 
     // If URL looks like PDF, hand off to pdf handler (it will fetch)
     if (isPdfByUrl) {
+      logger.info(`[browserService] PDF detected, switching to pdfHandler`);
       const result = await pdfHandle({ context, url: targetUrl.href });
       // done: archive url and mark success
       statusTracker.incrementSuccess(1);
@@ -63,6 +68,7 @@ async function handleCrawl(req, res) {
     }
 
     // Otherwise navigate and inspect the response
+    logger.info(`[browserService] HTML detected, switching to htmlHandler`);
     page = await context.newPage();
     const response = await page.goto(targetUrl.href, { waitUntil: 'domcontentloaded' });
     if (!response) throw new Error('No response received from target URL');
@@ -81,6 +87,7 @@ async function handleCrawl(req, res) {
     const result = await htmlHandle({ context, page, response, url: targetUrl.href });
     statusTracker.incrementSuccess(1);
     statusTracker.refreshSpinner({ status: 'ready', url: targetUrl.href, archived: true });
+    logger.info(`[browserService] request completed successfully for ${url}`);
     return res.json(result);
 
   } catch (err) {

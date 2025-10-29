@@ -206,15 +206,17 @@ export const cleanMarkdown = (markdown) => {
 };
 
 export const extractHtmlContent = async (page, { sanitize = true } = {}) => {
-  const { html, metadata } = await page.evaluate(
-    ({
-      candidateSelectors,
-      globalStripSelectors,
-      internalStripSelectors,
-      noiseKeywords,
-      shouldSanitize,
-      scoreFloor,
-    }) => {
+  let html, metadata;
+  try {
+    ({ html, metadata } = await page.evaluate(
+      ({
+        candidateSelectors,
+        globalStripSelectors,
+        internalStripSelectors,
+        noiseKeywords,
+        shouldSanitize,
+        scoreFloor,
+      }) => {
       const removeBySelectors = (root, selectors) => {
         selectors.forEach((selector) => {
           root.querySelectorAll(selector).forEach((node) => node.remove());
@@ -297,16 +299,39 @@ export const extractHtmlContent = async (page, { sanitize = true } = {}) => {
           h2: uniqueText('h2'),
         },
       };
-    },
-    {
-      candidateSelectors: CANDIDATE_SELECTORS,
-      globalStripSelectors: GLOBAL_STRIP_SELECTORS,
-      internalStripSelectors: INTERNAL_STRIP_SELECTORS,
-      noiseKeywords: NOISE_KEYWORDS,
-      shouldSanitize: sanitize,
-      scoreFloor: SCORE_CONTENT_FLOOR,
-    },
-  );
+      },
+      {
+        candidateSelectors: CANDIDATE_SELECTORS,
+        globalStripSelectors: GLOBAL_STRIP_SELECTORS,
+        internalStripSelectors: INTERNAL_STRIP_SELECTORS,
+        noiseKeywords: NOISE_KEYWORDS,
+        shouldSanitize: sanitize,
+        scoreFloor: SCORE_CONTENT_FLOOR,
+      },
+    ));
+  } catch (err) {
+    // If the page navigated while evaluating, the execution context can be destroyed.
+    // Fallback: grab the raw page HTML and extract minimal metadata via simple regex.
+    const msg = String(err && err.message ? err.message : err);
+    if (/Execution context was destroyed/i.test(msg) || /context was destroyed/i.test(msg)) {
+      html = '<!DOCTYPE html>' + (await page.content());
+
+      const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+      const descMatch = html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i) || html.match(/<meta[^>]+property=["']og:description["'][^>]*content=["']([^"']*)["'][^>]*>/i);
+
+      const h1Matches = Array.from(html.matchAll(/<h1[^>]*>(.*?)<\/h1>/gi)).map((m) => m[1].replace(/<[^>]+>/g, '').trim()).filter(Boolean);
+      const h2Matches = Array.from(html.matchAll(/<h2[^>]*>(.*?)<\/h2>/gi)).map((m) => m[1].replace(/<[^>]+>/g, '').trim()).filter(Boolean);
+
+      metadata = {
+        title: titleMatch ? titleMatch[1].trim() : null,
+        description: descMatch ? descMatch[1].trim() : null,
+        h1: Array.from(new Set(h1Matches)).slice(0, 5),
+        h2: Array.from(new Set(h2Matches)).slice(0, 5),
+      };
+    } else {
+      throw err;
+    }
+  }
 
   const htmlForMarkdown = html || (await page.content());
   const markdown = cleanMarkdown(turndown.turndown(htmlForMarkdown));
