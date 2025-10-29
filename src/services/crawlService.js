@@ -10,25 +10,7 @@ import { extractHtmlContent, convertPdfBufferToMarkdown } from '../utils/markdow
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 
-const EXTRA_HEADERS = {
-  accept:
-    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
-  'accept-language': 'en-GB,en-US;q=0.9,en;q=0.8',
-  'cache-control': 'max-age=0',
-  'sec-ch-ua': '"Google Chrome";v="141", "Not?A_Brand";v="8", "Chromium";v="141"',
-  'sec-ch-ua-mobile': '?0',
-  'sec-ch-ua-platform': '"macOS"',
-  'sec-fetch-dest': 'document',
-  'sec-fetch-mode': 'navigate',
-  'sec-fetch-site': 'none',
-  'sec-fetch-user': '?1',
-  'upgrade-insecure-requests': '1',
-}; 
-
-const buildCookieHeader = (cookies = []) =>
-  cookies
-    .map((cookie) => `${cookie.name}=${cookie.value}`)
-    .join('; ');
+const buildCookieHeader = (cookies = []) => cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
 
 const fetchPdfBuffer = async (context, response, targetUrl) => {
   if (response) {
@@ -148,7 +130,6 @@ const handleCrawl = async (req, res) => {
     statusTracker.refreshSpinner({ status: 'active', url: targetUrl.href });
 
     const combinedHeaders = {
-      ...EXTRA_HEADERS,
       'user-agent': USER_AGENT,
     };
 
@@ -167,53 +148,64 @@ const handleCrawl = async (req, res) => {
     context.setDefaultNavigationTimeout(constants.NAVIGATION_RETRY_TIMEOUT_MS);
     context.setDefaultTimeout(constants.NAVIGATION_RETRY_TIMEOUT_MS);
 
-    page = await context.newPage();
+    const pdfPathPattern = /\.pdf(?:$|[?#])/i;
+    const pdfPathCandidate = pdfPathPattern.test(targetUrl.pathname.toLowerCase()) || pdfPathPattern.test(targetUrl.href.toLowerCase());
 
     let navigationResponse;
     let finalUrl = targetUrl.href;
     let headers = {};
     let upstreamStatus = 0;
-    let navigationAttempts = 0;
 
-    while (navigationAttempts <= constants.CHALLENGE_MAX_REFRESHES) {
-      navigationAttempts += 1;
-      try {
-        navigationResponse = await page.goto(finalUrl, {
-          waitUntil: 'domcontentloaded',
-          timeout: constants.NAVIGATION_RETRY_TIMEOUT_MS,
-        });
-      } catch (navigationErr) {
-        if (navigationErr?.message?.includes('Download is starting')) {
-          processedAsPdf = true;
-          finalUrl = page.url() || targetUrl.href;
+    if (!pdfPathCandidate) {
+      page = await context.newPage();
+      let navigationAttempts = 0;
+
+      while (navigationAttempts <= constants.CHALLENGE_MAX_REFRESHES) {
+        navigationAttempts += 1;
+        try {
+          navigationResponse = await page.goto(finalUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: constants.NAVIGATION_RETRY_TIMEOUT_MS,
+          });
+        } catch (navigationErr) {
+          if (navigationErr?.message?.includes('Download is starting')) {
+            processedAsPdf = true;
+            finalUrl = page.url() || targetUrl.href;
+            if (page && !page.isClosed()) {
+              await page.close().catch(() => {});
+              page = null;
+            }
+            break;
+          }
+          const message = navigationErr?.message ?? '';
+          const retriable =
+            /net::|Navigation timeout|ProtocolError|Target page, context or browser has been closed/i.test(message);
+          const hasAttemptsRemaining = navigationAttempts <= constants.CHALLENGE_MAX_REFRESHES;
+          if (retriable && hasAttemptsRemaining) {
+            logger.warn?.(
+              `[crawl] Navigation retry ${navigationAttempts} for ${finalUrl} due to error: ${formatError(navigationErr)}`,
+            );
+            await page.waitForTimeout(1500).catch(() => {});
+            continue;
+          }
+          throw navigationErr;
+        }
+
+        if (!navigationResponse) {
           break;
         }
-        const message = navigationErr?.message ?? '';
-        const retriable =
-          /net::|Navigation timeout|ProtocolError|Target page, context or browser has been closed/i.test(message);
-        const hasAttemptsRemaining = navigationAttempts <= constants.CHALLENGE_MAX_REFRESHES;
-        if (retriable && hasAttemptsRemaining) {
-          logger.warn?.(
-            `[crawl] Navigation retry ${navigationAttempts} for ${finalUrl} due to error: ${formatError(navigationErr)}`,
-          );
-          await page.waitForTimeout(1500).catch(() => {});
-          continue;
+
+        finalUrl = navigationResponse.url();
+        upstreamStatus = navigationResponse.status();
+        headers = navigationResponse.headers();
+        processedAsPdf = /application\/pdf/i.test(headers['content-type'] ?? '');
+
+        if (processedAsPdf || upstreamStatus < 400) {
+          break;
         }
-        throw navigationErr;
       }
-
-      if (!navigationResponse) {
-        break;
-      }
-
-      finalUrl = navigationResponse.url();
-      upstreamStatus = navigationResponse.status();
-      headers = navigationResponse.headers();
-      processedAsPdf = /application\/pdf/i.test(headers['content-type'] ?? '');
-
-      if (processedAsPdf || upstreamStatus < 400) {
-        break;
-      }
+    } else {
+      processedAsPdf = true;
     }
 
     if (!processedAsPdf && !navigationResponse) {
@@ -241,7 +233,7 @@ const handleCrawl = async (req, res) => {
     }
 
     if (processedAsPdf) {
-      if (page) {
+      if (page && !page.isClosed()) {
         await page.close().catch(() => {});
         page = null;
       }
