@@ -10,7 +10,7 @@ let totalCrawls = 0;
 let successfulCrawls = 0;
 
 const spinnerState = {
-  status: 'starting up',
+  status: 'ready',
   lastUrl: '—',
   archived: false,
 };
@@ -18,9 +18,9 @@ const spinnerState = {
 const statusSpinner = process.stdout.isTTY ? ora({ spinner: 'dots', color: 'cyan' }) : null;
 
 const STATUS_COLORS = {
-  'starting up': chalk.yellow,
   ready: chalk.green,
   active: chalk.blue,
+  'starting up': chalk.yellow,
 };
 
 const formatStatusLabel = (status) => {
@@ -62,6 +62,8 @@ const refreshSpinner = ({ status, url, archived = false } = {}) => {
 
   statusSpinner.text = `${statusLabel} ${urlText}    ${counts}`;
   if (!statusSpinner.isSpinning) statusSpinner.start();
+  // force immediate render so the spinner text updates promptly
+  try { statusSpinner.render(); } catch (_) {}
 };
 
 const stopSpinner = () => {
@@ -92,7 +94,7 @@ const statusTracker = {
   getUptimeSeconds,
 };
 
-// initialize
-refreshSpinner({ status: 'starting up', url: '—' });
+// initialize as ready so the spinner doesn't show "starting up" after init
+refreshSpinner({ status: 'ready', url: '—' });
 
 export { statusTracker };

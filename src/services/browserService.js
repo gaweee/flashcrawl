@@ -2,7 +2,7 @@ import fs from 'fs';
 import { chromium } from 'rebrowser-playwright';
 import { logger } from '../utils/logger.js';
 import { formatError } from '../utils/errors.js';
-import { config, constants } from '../config.js';
+import { config, constants } from '../utils/config.js';
 import { processHtml, handleRequest as htmlHandle } from './htmlHandler.js';
 import { handleRequest as pdfHandle } from './pdfHandler.js';
 import { statusTracker } from '../utils/statusTracker.js';

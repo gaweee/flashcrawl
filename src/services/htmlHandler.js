@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { extractHtmlContent } from '../utils/markdown.js';
-import { config } from '../config.js';
+import { config } from '../utils/config.js';
 
 /**
  * Process an HTML page and return markdown, metadata and headers

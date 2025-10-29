@@ -11,16 +11,10 @@ beforeAll(async () => {
 });
 
 describe('flashcrawl API basics', () => {
-  it('returns status snapshot', async () => {
-    const res = await request(app).get('/status');
+  it('root returns OK', async () => {
+    const res = await request(app).get('/');
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({
-      uptimeSeconds: expect.any(Number),
-      totalCrawls: expect.any(Number),
-      successfulCrawls: expect.any(Number),
-      failedCrawls: expect.any(Number),
-      spinnerStatus: expect.any(String),
-    });
+    expect(res.body).toEqual({ status: 'OK' });
   });
 
   it('rejects crawl requests without url', async () => {

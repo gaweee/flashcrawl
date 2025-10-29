@@ -2,7 +2,7 @@ import fs from 'fs';
 import { chromium } from 'rebrowser-playwright';
 import { createHash } from 'crypto';
 import { logger } from '../utils/logger.js';
-import { config, constants } from '../config.js';
+import { config, constants } from '../utils/config.js';
 import { formatError } from '../utils/errors.js';
 import { fetchAndProcessPdf, fetchPdf, processPdfBuffer } from './pdfHandler.js';
 import { processHtml } from './htmlHandler.js';

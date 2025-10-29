@@ -1,14 +1,13 @@
 import express from 'express';
 import { handleCrawl } from './src/services/browserService.js';
-import { config } from './src/config.js';
+import { config } from './src/utils/config.js';
 import { logger } from './src/utils/logger.js';
-import { statusTracker } from './src/utils/statusTracker.js';
 import { registerErrorHandlers } from './src/utils/errors.js';
 
 const app = express();
 
-app.get('/status', (_req, res) => {
-  res.json(statusTracker.getSnapshot());
+app.get('/', (_req, res) => {
+  res.json({ status: 'OK' });
 });
 
 app.get('/crawl', handleCrawl);
@@ -23,11 +22,10 @@ const startServer = (port = config.port) => {
   }
 
   serverInstance = app.listen(port, () => {
-    statusTracker.refreshSpinner({ status: 'ready' });
+    logger.info(`[server] listening on ${port}`);
   });
 
   serverInstance.on('error', (err) => {
-    statusTracker.refreshSpinner({ status: 'starting up' });
     logger.error(`[server-start] ${err.message ?? err}`);
     process.exitCode = 1;
   });
@@ -46,7 +44,7 @@ const stopServer = async () => {
       else resolve();
     });
   });
-  statusTracker.stopSpinner();
+  // spinner removed; nothing to stop
   serverInstance = undefined;
 };
 
