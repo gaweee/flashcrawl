@@ -2,7 +2,6 @@ import fs from 'fs';
 import { chromium } from 'rebrowser-playwright';
 import { createHash } from 'crypto';
 import { logger } from '../logger.js';
-import { statusTracker } from '../statusTracker.js';
 import { config, constants } from '../config.js';
 import { formatError } from '../errors.js';
 import { extractHtmlContent, convertPdfBufferToMarkdown } from '../utils/markdown.js';
@@ -10,94 +9,61 @@ import { extractHtmlContent, convertPdfBufferToMarkdown } from '../utils/markdow
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
 
-const buildCookieHeader = (cookies = []) => cookies.map((cookie) => `${cookie.name}=${cookie.value}`).join('; ');
+/**
+ * Return minimal default headers for crawler requests.
+ */
+const getDefaultHeaders = () => ({
+  'user-agent': USER_AGENT,
+  ...(process.env.CRAWL_SESSION_COOKIE ? { cookie: process.env.CRAWL_SESSION_COOKIE } : {})
+});
 
-const fetchPdfBuffer = async (context, response, targetUrl) => {
-  if (response) {
-    try {
-      const body = await response.body();
-      if (body && body.length > 0) {
-        return Buffer.from(body);
-      }
-    } catch (err) {
-      logger.warn(
-        `[crawl] Unable to read PDF buffer from navigation response for ${targetUrl.href}: ${formatError(err)}`,
-      );
-    }
-  }
-
+/**
+ * Fetch PDF bytes from a URL using the Playwright request API.
+ * Keep headers minimal: user-agent + optional session cookie.
+ */
+const fetchPdf = async (context, url) => {
   const headers = {
     'user-agent': USER_AGENT,
-    accept: 'application/pdf,application/octet-stream;q=0.9,*/*;q=0.8',
-    referer: targetUrl.href,
+    accept: 'application/pdf,*/*;q=0.8',
+    referer: url,
+    ...(process.env.CRAWL_SESSION_COOKIE && { cookie: process.env.CRAWL_SESSION_COOKIE })
   };
 
-  if (process.env.CRAWL_SESSION_COOKIE) {
-    headers.cookie = process.env.CRAWL_SESSION_COOKIE;
-  }
-
-  const cookies = await context.cookies();
-  const cookieHeader = buildCookieHeader(cookies);
-  if (cookieHeader) {
-    headers.cookie = cookieHeader;
-  }
-
-  const apiResponse = await context.request.get(targetUrl.href, { headers });
-  if (!apiResponse.ok()) {
-    throw new Error(`PDF request failed (${apiResponse.status()})`);
-  }
-
-  const apiBuffer = await apiResponse.body();
-  return Buffer.from(apiBuffer);
+  const resp = await context.request.get(url, { headers });
+  if (!resp.ok()) throw new Error(`PDF fetch failed (${resp.status()})`);
+  return Buffer.from(await resp.body());
 };
 
+/** Launch a browser (stealth if available). */
 const launchStealthBrowser = async () => {
   if (typeof chromium.useStealth === 'function') {
     chromium.useStealth();
   }
 
-  const errors = [];
-
-  const attemptLaunch = async (label, options) => {
-    try {
-      const browserInstance = await chromium.launch(options);
-      logger.debug?.(`[crawl] chromium.launch succeeded using ${label}`);
-      return browserInstance;
-    } catch (err) {
-      errors.push(`${label}: ${formatError(err)}`);
-      return null;
-    }
-  };
-
-  const attempts = [];
-
+  // Simple single-attempt launch keeps code small; errors bubble up with clear message.
+  const options = { headless: true };
   if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE && fs.existsSync(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE)) {
-    attempts.push({ label: `env:${process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE}`, options: { headless: true, executablePath: process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE } });
+    options.executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE;
   }
 
   try {
-    const defaultExec = typeof chromium.executablePath === 'function' ? chromium.executablePath() : undefined;
-    if (defaultExec && fs.existsSync(defaultExec)) {
-      attempts.push({ label: `default:${defaultExec}`, options: { headless: true, executablePath: defaultExec } });
-    }
+    return await chromium.launch(options);
   } catch (err) {
-    logger.debug?.(`[crawl] chromium.executablePath() failed: ${formatError(err)}`);
-  }
-
-  attempts.push({ label: 'channel:chrome', options: { headless: true, channel: 'chrome' } });
-  attempts.push({ label: 'channel:chromium', options: { headless: true, channel: 'chromium' } });
-  attempts.push({ label: 'default', options: { headless: true } });
-
-  for (const attempt of attempts) {
-    const result = await attemptLaunch(attempt.label, attempt.options);
-    if (result) {
-      return result;
+    // If the cached Playwright binary is missing, try common system channels before failing.
+    const msg = String(err?.message ?? err);
+    try {
+      // try system chrome first
+      return await chromium.launch({ headless: true, channel: 'chrome' });
+    } catch (_) {
+      try {
+        return await chromium.launch({ headless: true, channel: 'chromium' });
+      } catch (__) {
+        // final: surface a helpful instruction
+        const hint = `Playwright browser not found. Run:\n\n  npx rebrowser-playwright install chromium --with-deps\n\nor\n  npx playwright install chromium\n\nor set PLAYWRIGHT_CHROMIUM_EXECUTABLE to a Chrome/Chromium binary.`;
+        throw new Error(`Failed to launch Chromium: ${msg}\n${hint}`);
+      }
     }
   }
-
-  const installHint =
-    "Install Chromium via 'npx rebrowser-playwright install chromium --with-deps' or set PLAYWRIGHT_CHROMIUM_EXECUTABLE to an existing Chrome/Chromium binary.";
-  throw new Error(`Failed to launch Chromium. Attempts made:\n${errors.join('\n')}\n${installHint}`);
 };
 
 const handleCrawl = async (req, res) => {
@@ -123,19 +89,10 @@ const handleCrawl = async (req, res) => {
   let context;
   let page = null;
   let processedAsPdf = false;
-  let pdfConversionError = null;
-  let pdfStatusRecorded = false;
 
   try {
-    statusTracker.refreshSpinner({ status: 'active', url: targetUrl.href });
-
-    const combinedHeaders = {
-      'user-agent': USER_AGENT,
-    };
-
-    if (process.env.CRAWL_SESSION_COOKIE) {
-      combinedHeaders.cookie = process.env.CRAWL_SESSION_COOKIE;
-    }
+    // status tracking removed — keep console/log file output only
+    const combinedHeaders = getDefaultHeaders();
 
     browser = await launchStealthBrowser();
 
@@ -210,7 +167,6 @@ const handleCrawl = async (req, res) => {
 
     if (!processedAsPdf && !navigationResponse) {
       const message = 'No response received from target URL';
-      statusTracker.recordCrawlResult({ statusCode: 502, error: message, url: finalUrl });
       logger.warn(`[crawl] ${message}: ${finalUrl}`);
       return res.status(502).json({ error: message });
     }
@@ -255,26 +211,21 @@ const handleCrawl = async (req, res) => {
           pdfUrlString = targetUrl.href;
         }
 
-        pdfBuffer = await fetchPdfBuffer(context, navigationResponse, new URL(pdfUrlString));
+  pdfBuffer = await fetchPdf(context, pdfUrlString);
         if (!pdfBuffer || pdfBuffer.length === 0) {
           throw new Error('Empty PDF response');
         }
 
         headers = { 'content-type': 'application/pdf' };
 
-        markdown = await convertPdfBufferToMarkdown(pdfBuffer);
-        hash = createHash('sha256').update(markdown).digest('hex');
-        statusTracker.recordPdfConversion({ statusCode: 200 });
-        pdfStatusRecorded = true;
-        pdfConversionError = null;
-        logger.info(`[crawl] Processed PDF for ${targetUrl.href}`);
+  markdown = await convertPdfBufferToMarkdown(pdfBuffer);
+  hash = createHash('sha256').update(markdown).digest('hex');
+  logger.info(`[crawl] Processed PDF for ${targetUrl.href}`);
       } catch (err) {
-        pdfConversionError = formatError(err);
+        const ferr = formatError(err);
         markdown = '';
         hash = null;
-        statusTracker.recordPdfConversion({ statusCode: 500, error: pdfConversionError });
-        pdfStatusRecorded = true;
-        logger.error(`[crawl] Failed to analyse PDF for ${targetUrl.href}: ${pdfConversionError}`);
+        logger.error(`[crawl] Failed to analyse PDF for ${targetUrl.href}: ${ferr}`);
         throw err;
       }
     } else {
@@ -306,7 +257,7 @@ const handleCrawl = async (req, res) => {
 
     const upstreamError = upstreamStatus >= 400 ? `Upstream responded with status ${upstreamStatus}` : undefined;
 
-    statusTracker.recordCrawlResult({ statusCode: reportedStatus, error: undefined, url: finalUrl });
+  // crawl result metric removed
 
     const duration = Date.now() - startTime;
     const crawlMessage = `[crawl] ${finalUrl} -> ${reportedStatus} (${
@@ -336,10 +287,7 @@ const handleCrawl = async (req, res) => {
     const message = formatError(err);
     const finalUrl = targetUrl?.href ?? url;
     const duration = Date.now() - startTime;
-    if (processedAsPdf && !pdfStatusRecorded) {
-      statusTracker.recordPdfConversion({ statusCode: 500, error: message });
-    }
-    statusTracker.recordCrawlResult({ statusCode: 500, error: message, url: finalUrl });
+    // status tracking removed
     logger.error(`[crawl] Failed to crawl ${finalUrl}: ${message} (in ${duration}ms)`);
     res.status(500).json({ error: 'Failed to crawl URL', details: message });
   } finally {
@@ -352,7 +300,6 @@ const handleCrawl = async (req, res) => {
     if (browser) {
       await browser.close().catch(() => {});
     }
-    statusTracker.refreshSpinner({ status: 'ready' });
   }
 };
 
