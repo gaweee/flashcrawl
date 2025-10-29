@@ -1,5 +1,4 @@
 import { logger } from './logger.js';
-import { statusTracker } from './statusTracker.js';
 
 const formatError = (value) => {
   if (value instanceof Error) {
@@ -18,7 +17,6 @@ const formatError = (value) => {
 const handleFatalError = (label, err) => {
   const message = formatError(err);
   logger.error(`[${label}] ${message}`);
-  statusTracker.setLastError(message);
 };
 
 const registerErrorHandlers = () => {

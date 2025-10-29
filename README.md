@@ -5,8 +5,7 @@ flashcrawl is a lightweight crawler built on top of rebrowser-playwright (Playwr
 ## Features
 - `/crawl` endpoint that fetches a URL, follows up to five redirects, and returns structured headers, metadata, Markdown, and a SHA-256 hash of the Markdown. HTML pages are converted with Turndown; PDFs are downloaded to `./tmp` and analysed with `@opendocsg/pdf2md` before hashing.
 - Content hygiene: scripts, styles, and other non-content tags are stripped before Markdown conversion by default. Sanitisation can be toggled via environment variables when needed.
-- `/status` endpoint exposes uptime, crawl counters, and the latest watchdog observations.
-- Watchdog timer warns about event-loop stalls; optional console output (when enabled) is prettified with `chalk` and `ora` for quick status notes.
+- `/status` endpoint exposes uptime and simple runtime status.
 - Winston logger writes timestamped log files to the `logs/` directory (one file per day) and can also mirror output to the console.
 
 ## Getting Started
@@ -28,7 +27,7 @@ npm run dev
 
 ## API Endpoints
 - `GET /crawl?url=<targetUrl>` – crawl the provided URL and return structured crawl data (HTML or PDF).
-- `GET /status` – runtime metrics including uptime (seconds), crawl counters, last status code, last error, and latest watchdog observation.
+- `GET /status` – runtime metrics including uptime (seconds) and simple runtime status.
 
 ## Configuration
 You can configure behaviour through a `.env` file:
@@ -67,4 +66,4 @@ When the target responds with a PDF, the raw file is saved to `./tmp`, converted
 ## Notes
 - Requires Node.js ≥ 18.
 - Rebrowser Playwright runs headless Chromium by default and manages its own browser binaries.
-- Watchdog warnings and crawl summaries are handled by Winston; if console logging is disabled they remain available in the daily log files.
+- Crawl summaries and warnings are handled by Winston; if console logging is disabled they remain available in the daily log files.

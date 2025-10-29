@@ -3,7 +3,6 @@ import { handleCrawl } from './src/services/browserService.js';
 import { config } from './src/config.js';
 import { logger } from './src/logger.js';
 import { statusTracker } from './src/statusTracker.js';
-import { startWatchdog, stopWatchdog } from './src/watchdog.js';
 import { registerErrorHandlers } from './src/errors.js';
 
 const app = express();
@@ -25,8 +24,6 @@ const startServer = (port = config.port) => {
 
   serverInstance = app.listen(port, () => {
     statusTracker.refreshSpinner({ status: 'ready' });
-    startWatchdog();
-    statusTracker.refreshSpinner();
   });
 
   serverInstance.on('error', (err) => {
@@ -49,8 +46,6 @@ const stopServer = async () => {
       else resolve();
     });
   });
-
-  stopWatchdog();
   statusTracker.stopSpinner();
   serverInstance = undefined;
 };

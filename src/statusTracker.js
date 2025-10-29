@@ -1,26 +1,18 @@
 import chalk from 'chalk';
 import ora from 'ora';
 
-const statusNotes = {
-  startTime: Date.now(),
-  totalCrawls: 0,
-  successfulCrawls: 0,
-  failedCrawls: 0,
-  lastCrawlAt: null,
-  lastStatusCode: null,
-  lastError: null,
-  lastWatchdogWarning: null,
-  lastEventLoopLagMs: 0,
-  pdfAttempts: 0,
-  pdfConversions: 0,
-  pdfConversionFailures: 0,
-  spinnerStatus: 'starting up',
-  lastUrl: '—',
-};
+// Spinner-focused status tracker.
+// Shows: [spinner] [status (colored)] [active url (grey)]    [success(green)/total]
+
+const _startTime = Date.now();
+
+let totalCrawls = 0;
+let successfulCrawls = 0;
 
 const spinnerState = {
   status: 'starting up',
   lastUrl: '—',
+  archived: false,
 };
 
 const statusSpinner = process.stdout.isTTY ? ora({ spinner: 'dots', color: 'cyan' }) : null;
@@ -28,7 +20,7 @@ const statusSpinner = process.stdout.isTTY ? ora({ spinner: 'dots', color: 'cyan
 const STATUS_COLORS = {
   'starting up': chalk.yellow,
   ready: chalk.green,
-  active: chalk.cyan,
+  active: chalk.blue,
 };
 
 const formatStatusLabel = (status) => {
@@ -36,127 +28,71 @@ const formatStatusLabel = (status) => {
   return colorizer(`[${status}]`);
 };
 
-const formatStatsText = () => {
-  const totalOps = statusNotes.totalCrawls + statusNotes.pdfAttempts;
-  const totalText = chalk.blue(`total ${totalOps}`);
-  const htmlText = chalk.green(`html ${statusNotes.totalCrawls}`);
-  const pdfText = chalk.magenta(`pdf ${statusNotes.pdfAttempts}`);
-  const failedCount = statusNotes.failedCrawls + statusNotes.pdfConversionFailures;
-  const failedText = chalk.red(`failed ${failedCount}`);
-  return `${totalText} | ${htmlText} | ${pdfText} | ${failedText}`;
+const truncate = (s, max = 80) => {
+  if (!s) return '—';
+  if (s.length <= max) return s;
+  const head = Math.ceil(max * 0.55);
+  const tail = max - head - 1;
+  return `${s.slice(0, head)}…${s.slice(-tail)}`;
 };
 
-const refreshSpinner = ({ status, url } = {}) => {
-  if (status) {
-    spinnerState.status = status;
-  }
-  if (url !== undefined) {
-    spinnerState.lastUrl = url || '—';
+const history = [];
+const HISTORY_MAX = 10;
+
+const refreshSpinner = ({ status, url, archived = false } = {}) => {
+  if (status) spinnerState.status = status;
+  if (url !== undefined) spinnerState.lastUrl = url || '—';
+  spinnerState.archived = archived === true;
+
+  // when archiving, push to history
+  if (spinnerState.archived && spinnerState.lastUrl) {
+    history.unshift(spinnerState.lastUrl);
+    if (history.length > HISTORY_MAX) history.pop();
   }
 
-  statusNotes.spinnerStatus = spinnerState.status;
-  statusNotes.lastUrl = spinnerState.lastUrl;
-
-  if (!statusSpinner) {
-    return;
-  }
+  if (!statusSpinner) return;
 
   const statusLabel = formatStatusLabel(spinnerState.status);
-  const urlText = chalk.gray(spinnerState.lastUrl || '—');
-  const statsText = formatStatsText();
+  const rawUrl = spinnerState.lastUrl || '—';
+  const display = truncate(rawUrl, 72);
+  const urlText = spinnerState.archived ? chalk.dim(display) : chalk.gray(display);
 
-  statusSpinner.text = `${statusLabel} ${urlText} ${chalk.dim('........')} ${statsText}`;
+  // show success/total as right-hand info
+  const counts = `${chalk.green(String(successfulCrawls))}/${String(totalCrawls)}`;
 
-  if (!statusSpinner.isSpinning) {
-    statusSpinner.start();
-  }
-};
-
-const getUptimeSeconds = () => Math.round((Date.now() - statusNotes.startTime) / 1000);
-
-const recordCrawlResult = ({ statusCode, error, url }) => {
-  statusNotes.totalCrawls += 1;
-  statusNotes.lastCrawlAt = new Date().toISOString();
-  statusNotes.lastStatusCode = statusCode;
-
-  if (url) {
-    statusNotes.lastUrl = url;
-  }
-
-  if (error) {
-    statusNotes.failedCrawls += 1;
-    statusNotes.lastError = error;
-  } else {
-    statusNotes.successfulCrawls += 1;
-    statusNotes.lastError = null;
-  }
-
-  refreshSpinner();
-};
-
-const recordPdfConversion = ({ statusCode, error }) => {
-  statusNotes.pdfAttempts += 1;
-  statusNotes.lastCrawlAt = new Date().toISOString();
-  statusNotes.lastStatusCode = statusCode;
-
-  if (error) {
-    statusNotes.pdfConversionFailures += 1;
-    statusNotes.lastError = error;
-  } else {
-    statusNotes.pdfConversions += 1;
-    statusNotes.lastError = null;
-  }
-
-  refreshSpinner();
-};
-
-const noteWatchdogLag = (lagMs) => {
-  statusNotes.lastEventLoopLagMs = Math.round(lagMs);
-  statusNotes.lastWatchdogWarning = new Date().toISOString();
-};
-
-const setLastError = (message) => {
-  statusNotes.lastError = message;
-  refreshSpinner();
+  statusSpinner.text = `${statusLabel} ${urlText}    ${counts}`;
+  if (!statusSpinner.isSpinning) statusSpinner.start();
 };
 
 const stopSpinner = () => {
-  if (statusSpinner?.isSpinning) {
-    statusSpinner.stop();
-  }
+  if (statusSpinner?.isSpinning) statusSpinner.stop();
 };
+
+const incrementTotal = (n = 1) => { totalCrawls += n; };
+const incrementSuccess = (n = 1) => { successfulCrawls += n; };
+
+const getUptimeSeconds = () => Math.round((Date.now() - _startTime) / 1000);
 
 const getSnapshot = () => ({
   uptimeSeconds: getUptimeSeconds(),
-  totalCrawls: statusNotes.totalCrawls,
-  successfulCrawls: statusNotes.successfulCrawls,
-  failedCrawls: statusNotes.failedCrawls,
-  pdfAttempts: statusNotes.pdfAttempts,
-  pdfConversions: statusNotes.pdfConversions,
-  pdfConversionFailures: statusNotes.pdfConversionFailures,
-  failedTotal: statusNotes.failedCrawls + statusNotes.pdfConversionFailures,
-  lastCrawlAt: statusNotes.lastCrawlAt,
-  lastStatusCode: statusNotes.lastStatusCode,
-  lastError: statusNotes.lastError,
-  lastUrl: statusNotes.lastUrl,
-  spinnerStatus: statusNotes.spinnerStatus,
-  watchdog: {
-    lastWarning: statusNotes.lastWatchdogWarning,
-    eventLoopLagMs: statusNotes.lastEventLoopLagMs,
-  },
+  totalCrawls,
+  successfulCrawls,
+  failedCrawls: Math.max(0, totalCrawls - successfulCrawls),
+  spinnerStatus: spinnerState.status,
+  lastUrl: spinnerState.lastUrl,
+  history: history.slice(),
 });
 
 const statusTracker = {
   refreshSpinner,
-  recordCrawlResult,
-  recordPdfConversion,
-  noteWatchdogLag,
-  setLastError,
   stopSpinner,
+  incrementTotal,
+  incrementSuccess,
   getSnapshot,
   getUptimeSeconds,
 };
 
+// initialize
 refreshSpinner({ status: 'starting up', url: '—' });
 
-export { statusTracker, statusNotes };
+export { statusTracker };

@@ -17,8 +17,6 @@ const config = {
 };
 
 const constants = Object.freeze({
-  WATCHDOG_INTERVAL_MS: 10000,
-  WATCHDOG_THRESHOLD_MS: 750,
   MAX_REDIRECTS: 5,
   DEFAULT_NAV_TIMEOUT_MS: 45000,
   CHALLENGE_MAX_REFRESHES: 2,
