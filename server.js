@@ -1,5 +1,5 @@
 import express from 'express';
-import { handleCrawl } from './src/services/crawlService.js';
+import { handleCrawl } from './src/services/browserService.js';
 import { config } from './src/config.js';
 import { logger } from './src/logger.js';
 import { statusTracker } from './src/statusTracker.js';

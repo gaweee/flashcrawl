@@ -4,7 +4,8 @@ import { createHash } from 'crypto';
 import { logger } from '../logger.js';
 import { config, constants } from '../config.js';
 import { formatError } from '../errors.js';
-import { extractHtmlContent, convertPdfBufferToMarkdown } from '../utils/markdown.js';
+import { fetchAndProcessPdf, fetchPdf, processPdfBuffer } from './pdfHandler.js';
+import { processHtml } from './htmlHandler.js';
 
 const USER_AGENT =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Safari/537.36';
@@ -17,22 +18,7 @@ const getDefaultHeaders = () => ({
   ...(process.env.CRAWL_SESSION_COOKIE ? { cookie: process.env.CRAWL_SESSION_COOKIE } : {})
 });
 
-/**
- * Fetch PDF bytes from a URL using the Playwright request API.
- * Keep headers minimal: user-agent + optional session cookie.
- */
-const fetchPdf = async (context, url) => {
-  const headers = {
-    'user-agent': USER_AGENT,
-    accept: 'application/pdf,*/*;q=0.8',
-    referer: url,
-    ...(process.env.CRAWL_SESSION_COOKIE && { cookie: process.env.CRAWL_SESSION_COOKIE })
-  };
 
-  const resp = await context.request.get(url, { headers });
-  if (!resp.ok()) throw new Error(`PDF fetch failed (${resp.status()})`);
-  return Buffer.from(await resp.body());
-};
 
 /** Launch a browser (stealth if available). */
 const launchStealthBrowser = async () => {
@@ -188,7 +174,7 @@ const handleCrawl = async (req, res) => {
       }).catch(() => {});
     }
 
-    if (processedAsPdf) {
+  if (processedAsPdf) {
       if (page && !page.isClosed()) {
         await page.close().catch(() => {});
         page = null;
@@ -212,15 +198,9 @@ const handleCrawl = async (req, res) => {
         }
 
   pdfBuffer = await fetchPdf(context, pdfUrlString);
-        if (!pdfBuffer || pdfBuffer.length === 0) {
-          throw new Error('Empty PDF response');
-        }
-
-        headers = { 'content-type': 'application/pdf' };
-
-  markdown = await convertPdfBufferToMarkdown(pdfBuffer);
-  hash = createHash('sha256').update(markdown).digest('hex');
-  logger.info(`[crawl] Processed PDF for ${targetUrl.href}`);
+        if (!pdfBuffer || pdfBuffer.length === 0) throw new Error('Empty PDF response');
+        ({ markdown, hash } = await processPdfBuffer(pdfBuffer, targetUrl.href));
+        logger.info(`[crawl] Processed PDF for ${targetUrl.href}`);
       } catch (err) {
         const ferr = formatError(err);
         markdown = '';
@@ -229,17 +209,11 @@ const handleCrawl = async (req, res) => {
         throw err;
       }
     } else {
-      const { markdown: htmlMarkdown, metadata: extractedMetadata } = await extractHtmlContent(page, {
-        sanitize: config.sanitizeHtml,
-      });
-
-      metadata = extractedMetadata ?? metadata;
-      markdown = htmlMarkdown;
-      hash = createHash('sha256').update(markdown).digest('hex');
-      headers = {
-        ...headers,
-        'content-type': headers['content-type'] ?? 'text/html; charset=utf-8',
-      };
+      const htmlResult = await processHtml(page, navigationResponse || ({}));
+      metadata = htmlResult.metadata;
+      markdown = htmlResult.markdown;
+      hash = htmlResult.hash;
+      headers = { ...headers, 'content-type': htmlResult.headers['content-type'] };
     }
 
     const reportedStatus = (() => {
