@@ -1,4 +1,5 @@
 import { URL } from 'url';
+import { logger } from './logger.js';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
 import pdf2md from '@opendocsg/pdf2md';
@@ -173,6 +174,27 @@ const createTurndown = () => {
 
 const turndown = createTurndown();
 
+// Robust page.content helper: retry a few times if the page is navigating and
+// Playwright rejects with a navigation-related message.
+const safeGetPageContent = async (page, { attempts = 4, delay = 200 } = {}) => {
+  for (let i = 0; i < attempts; i += 1) {
+    try {
+      return await page.content();
+    } catch (err) {
+      const msg = String(err && err.message ? err.message : err);
+      // Known transient messages from Playwright when navigation is happening
+      const isNavError = /page\.content: Unable to retrieve content because the page is navigating/i.test(msg) || /Execution context was destroyed/i.test(msg) || /context was destroyed/i.test(msg) || /navigation/i.test(msg);
+      if (!isNavError) throw err;
+      if (i === attempts - 1) throw err;
+      // small backoff and retry
+      // eslint-disable-next-line no-await-in-loop
+      await new Promise((r) => setTimeout(r, delay));
+    }
+  }
+  // should never reach here
+  return await page.content();
+};
+
 export const cleanMarkdown = (markdown) => {
   if (!markdown) return '';
 
@@ -207,127 +229,177 @@ export const cleanMarkdown = (markdown) => {
 
 export const extractHtmlContent = async (page, { sanitize = true } = {}) => {
   let html, metadata;
+  // extraction function run inside the page context
+  const extractionFn = ({
+    candidateSelectors,
+    globalStripSelectors,
+    internalStripSelectors,
+    noiseKeywords,
+    shouldSanitize,
+    scoreFloor,
+  }) => {
+    const removeBySelectors = (root, selectors) => {
+      selectors.forEach((selector) => {
+        root.querySelectorAll(selector).forEach((node) => node.remove());
+      });
+    };
+
+    const noisePattern = noiseKeywords.length ? new RegExp(noiseKeywords.join('|'), 'i') : null;
+
+    if (shouldSanitize) {
+      removeBySelectors(document, globalStripSelectors);
+    }
+
+    const candidates = [];
+    candidateSelectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((node) => {
+        if (node && !candidates.includes(node)) {
+          candidates.push(node);
+        }
+      });
+    });
+
+    const scoreNode = (node) => {
+      if (!node) {
+        return 0;
+      }
+      const text = (node.innerText || '').replace(/\s+/g, ' ');
+      const structureScore = node.querySelectorAll('p,li,h1,h2,h3,figure,table').length * 35;
+      return text.length + structureScore;
+    };
+
+    let root = document.body;
+    let bestScore = scoreNode(root);
+    candidates.forEach((candidate) => {
+      const candidateScore = scoreNode(candidate);
+      if (candidateScore > bestScore) {
+        bestScore = candidateScore;
+        root = candidate;
+      }
+    });
+
+    if (bestScore < scoreFloor) {
+      root = document.body;
+    }
+
+    const clone = root.cloneNode(true);
+
+    if (shouldSanitize) {
+      removeBySelectors(clone, internalStripSelectors);
+
+      Array.from(clone.querySelectorAll('*')).forEach((element) => {
+        const signature = `${element.className || ''} ${element.id || ''}`.toLowerCase();
+        if (noisePattern && signature && noisePattern.test(signature)) {
+          element.remove();
+          return;
+        }
+
+        const style = window.getComputedStyle(element);
+        if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) {
+          element.remove();
+          return;
+        }
+      });
+    }
+
+    const uniqueText = (selector) =>
+      Array.from(clone.querySelectorAll(selector))
+        .map((node) => (node.textContent || '').trim())
+        .filter((text) => Boolean(text))
+        .filter((text, index, arr) => arr.indexOf(text) === index);
+
+    return {
+      html: '<!DOCTYPE html>' + clone.outerHTML,
+      metadata: {
+        title: document.title || null,
+        description:
+          document.querySelector('meta[name="description"]')?.getAttribute('content') ??
+          document.querySelector('meta[property="og:description"]')?.getAttribute('content') ??
+          null,
+        h1: uniqueText('h1'),
+        h2: uniqueText('h2'),
+      },
+    };
+  };
+
   try {
-    ({ html, metadata } = await page.evaluate(
-      ({
-        candidateSelectors,
-        globalStripSelectors,
-        internalStripSelectors,
-        noiseKeywords,
-        shouldSanitize,
-        scoreFloor,
-      }) => {
-      const removeBySelectors = (root, selectors) => {
-        selectors.forEach((selector) => {
-          root.querySelectorAll(selector).forEach((node) => node.remove());
-        });
-      };
-
-      const noisePattern = noiseKeywords.length ? new RegExp(noiseKeywords.join('|'), 'i') : null;
-
-      if (shouldSanitize) {
-        removeBySelectors(document, globalStripSelectors);
-      }
-
-      const candidates = [];
-      candidateSelectors.forEach((selector) => {
-        document.querySelectorAll(selector).forEach((node) => {
-          if (node && !candidates.includes(node)) {
-            candidates.push(node);
-          }
-        });
-      });
-
-      const scoreNode = (node) => {
-        if (!node) {
-          return 0;
-        }
-        const text = (node.innerText || '').replace(/\s+/g, ' ');
-        const structureScore = node.querySelectorAll('p,li,h1,h2,h3,figure,table').length * 35;
-        return text.length + structureScore;
-      };
-
-      let root = document.body;
-      let bestScore = scoreNode(root);
-      candidates.forEach((candidate) => {
-        const candidateScore = scoreNode(candidate);
-        if (candidateScore > bestScore) {
-          bestScore = candidateScore;
-          root = candidate;
-        }
-      });
-
-      if (bestScore < scoreFloor) {
-        root = document.body;
-      }
-
-      const clone = root.cloneNode(true);
-
-      if (shouldSanitize) {
-        removeBySelectors(clone, internalStripSelectors);
-
-        Array.from(clone.querySelectorAll('*')).forEach((element) => {
-          const signature = `${element.className || ''} ${element.id || ''}`.toLowerCase();
-          if (noisePattern && signature && noisePattern.test(signature)) {
-            element.remove();
-            return;
-          }
-
-          const style = window.getComputedStyle(element);
-          if (style && (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0')) {
-            element.remove();
-            return;
-          }
-        });
-      }
-
-      const uniqueText = (selector) =>
-        Array.from(clone.querySelectorAll(selector))
-          .map((node) => (node.textContent || '').trim())
-          .filter((text) => Boolean(text))
-          .filter((text, index, arr) => arr.indexOf(text) === index);
-
-      return {
-        html: '<!DOCTYPE html>' + clone.outerHTML,
-        metadata: {
-          title: document.title || null,
-          description:
-            document.querySelector('meta[name="description"]')?.getAttribute('content') ??
-            document.querySelector('meta[property="og:description"]')?.getAttribute('content') ??
-            null,
-          h1: uniqueText('h1'),
-          h2: uniqueText('h2'),
-        },
-      };
-      },
-      {
-        candidateSelectors: CANDIDATE_SELECTORS,
-        globalStripSelectors: GLOBAL_STRIP_SELECTORS,
-        internalStripSelectors: INTERNAL_STRIP_SELECTORS,
-        noiseKeywords: NOISE_KEYWORDS,
-        shouldSanitize: sanitize,
-        scoreFloor: SCORE_CONTENT_FLOOR,
-      },
-    ));
+    ({ html, metadata } = await page.evaluate(extractionFn, {
+      candidateSelectors: CANDIDATE_SELECTORS,
+      globalStripSelectors: GLOBAL_STRIP_SELECTORS,
+      internalStripSelectors: INTERNAL_STRIP_SELECTORS,
+      noiseKeywords: NOISE_KEYWORDS,
+      shouldSanitize: sanitize,
+      scoreFloor: SCORE_CONTENT_FLOOR,
+    }));
   } catch (err) {
-    // If the page navigated while evaluating, the execution context can be destroyed.
-    // Fallback: grab the raw page HTML and extract minimal metadata via simple regex.
-    const msg = String(err && err.message ? err.message : err);
-    if (/Execution context was destroyed/i.test(msg) || /context was destroyed/i.test(msg)) {
-      html = '<!DOCTYPE html>' + (await page.content());
+    // If evaluate failed, try one quick retry for transient session/navigation errors
+    const msg0 = String(err && err.message ? err.message : err);
+    const maybeTransient = /Execution context was destroyed/i.test(msg0)
+      || /context was destroyed/i.test(msg0)
+      || /Unable to retrieve content because the page is navigating/i.test(msg0)
+      || /cannot get world/i.test(msg0)
+      || /Runtime\.addBinding/i.test(msg0)
+      || /session closed/i.test(msg0)
+      || /Protocol error/i.test(msg0)
+      || (err && err.type === 'closed');
 
-      const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
-      const descMatch = html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i) || html.match(/<meta[^>]+property=["']og:description["'][^>]*content=["']([^"']*)["'][^>]*>/i);
+    if (maybeTransient) {
+      // small backoff then retry evaluate once
+      try {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((r) => setTimeout(r, 200));
+        ({ html, metadata } = await page.evaluate(extractionFn, {
+          candidateSelectors: CANDIDATE_SELECTORS,
+          globalStripSelectors: GLOBAL_STRIP_SELECTORS,
+          internalStripSelectors: INTERNAL_STRIP_SELECTORS,
+          noiseKeywords: NOISE_KEYWORDS,
+          shouldSanitize: sanitize,
+          scoreFloor: SCORE_CONTENT_FLOOR,
+        }));
+      } catch (err2) {
+        // if retry failed, fall back to existing fallback logic below
+        // replace err with the retry error for diagnostics
+        err = err2;
+      }
+    }
+  // If evaluate failed (and retry didn't succeed), the execution context can be destroyed,
+  // or the Playwright session can be closed unexpectedly (e.g. ProtocolError: Runtime.addBinding).
+  // Treat those as recoverable and fall back to grabbing the page HTML snapshot.
+  const msg = String(err && err.message ? err.message : err);
+    const isRecoverable = /Execution context was destroyed/i.test(msg)
+      || /context was destroyed/i.test(msg)
+      || /Unable to retrieve content because the page is navigating/i.test(msg)
+      || /cannot get world/i.test(msg)
+      || /Runtime\.addBinding/i.test(msg)
+      || /session closed/i.test(msg)
+      || /Protocol error/i.test(msg)
+      || (err && err.type === 'closed');
 
-      const h1Matches = Array.from(html.matchAll(/<h1[^>]*>(.*?)<\/h1>/gi)).map((m) => m[1].replace(/<[^>]+>/g, '').trim()).filter(Boolean);
-      const h2Matches = Array.from(html.matchAll(/<h2[^>]*>(.*?)<\/h2>/gi)).map((m) => m[1].replace(/<[^>]+>/g, '').trim()).filter(Boolean);
+    if (isRecoverable) {
+      try {
+        // try to get the page URL for diagnostics
+        let pageUrl = 'unknown';
+        try { pageUrl = page.url(); } catch (_) {}
+        logger.warn(`[markdown] evaluate failed, falling back to page snapshot (${pageUrl}): ${msg}`);
 
-      metadata = {
-        title: titleMatch ? titleMatch[1].trim() : null,
-        description: descMatch ? descMatch[1].trim() : null,
-        h1: Array.from(new Set(h1Matches)).slice(0, 5),
-        h2: Array.from(new Set(h2Matches)).slice(0, 5),
-      };
+        const raw = await safeGetPageContent(page).catch((e) => { throw e; });
+        html = '<!DOCTYPE html>' + raw;
+
+        const titleMatch = html.match(/<title[^>]*>([^<]*)<\/title>/i);
+        const descMatch = html.match(/<meta[^>]+name=["']description["'][^>]*content=["']([^"']*)["'][^>]*>/i) || html.match(/<meta[^>]+property=["']og:description["'][^>]*content=["']([^"']*)["'][^>]*>/i);
+
+        const h1Matches = Array.from(html.matchAll(/<h1[^>]*>(.*?)<\/h1>/gi)).map((m) => m[1].replace(/<[^>]+>/g, '').trim()).filter(Boolean);
+        const h2Matches = Array.from(html.matchAll(/<h2[^>]*>(.*?)<\/h2>/gi)).map((m) => m[1].replace(/<[^>]+>/g, '').trim()).filter(Boolean);
+
+        metadata = {
+          title: titleMatch ? titleMatch[1].trim() : null,
+          description: descMatch ? descMatch[1].trim() : null,
+          h1: Array.from(new Set(h1Matches)).slice(0, 5),
+          h2: Array.from(new Set(h2Matches)).slice(0, 5),
+        };
+      } catch (fallbackErr) {
+        throw fallbackErr || err;
+      }
     } else {
       throw err;
     }

@@ -2,7 +2,7 @@ import express from 'express';
 import { handleCrawl } from './src/services/browserService.js';
 import { config } from './src/utils/config.js';
 import { logger } from './src/utils/logger.js';
-import { registerErrorHandlers } from './src/utils/errors.js';
+import { registerErrorHandlers, formatError } from './src/utils/errors.js';
 
 const app = express();
 
@@ -10,7 +10,24 @@ app.get('/', (_req, res) => {
   res.json({ status: 'OK' });
 });
 
-app.get('/crawl', handleCrawl);
+// wrapper to ensure async errors are forwarded to Express error middleware
+const wrapAsync = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
+
+app.get('/crawl', wrapAsync(handleCrawl));
+
+// 404 handler (JSON)
+app.use((req, res) => {
+  res.status(404).json({ error: 'Not Found', path: req.originalUrl });
+});
+
+// JSON error handler
+app.use((err, req, res, next) => {
+  try {
+    logger.error(`[express] ${formatError(err)}`);
+  } catch (_) {}
+  if (res.headersSent) return next(err);
+  res.status(500).json({ error: 'Internal Server Error', details: String(err?.message ?? err) });
+});
 
 registerErrorHandlers();
 
