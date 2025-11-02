@@ -6,6 +6,10 @@ import { registerErrorHandlers, formatError } from './src/utils/errors.js';
 
 const app = express();
 
+// parse JSON and urlencoded form bodies (for POST /crawl)
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
 app.get('/', (_req, res) => {
   res.json({ status: 'OK' });
 });
@@ -13,7 +17,10 @@ app.get('/', (_req, res) => {
 // wrapper to ensure async errors are forwarded to Express error middleware
 const wrapAsync = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next);
 
+// GET /crawl?url=...
 app.get('/crawl', wrapAsync(handleCrawl));
+// POST /crawl with url in body (application/json or application/x-www-form-urlencoded)
+app.post('/crawl', wrapAsync(handleCrawl));
 
 // 404 handler (JSON)
 app.use((req, res) => {

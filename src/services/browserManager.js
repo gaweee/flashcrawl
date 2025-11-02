@@ -33,11 +33,11 @@ let lastError = null;
 /**
  * Internal: wire 'disconnected' to allow auto-recreate on next call.
  */
-function attachLifecycle(browser) {
+function attachLifecycle(browser, { shared = true } = {}) {
   try {
     browser.on?.('disconnected', () => {
-      // Reset so the next getBrowser() will recreate
-      browserPromise = null;
+      // If this was the shared browser, reset the shared promise so callers can recreate it.
+      if (shared) browserPromise = null;
     });
   } catch {}
 }
@@ -49,7 +49,7 @@ async function tryConnectCDP() {
   // Customize the endpoint via env if you want
   const endpoint = process.env.PW_CDP_ENDPOINT || 'http://127.0.0.1:9222';
   const browser = await chromium.connectOverCDP(endpoint);
-  attachLifecycle(browser);
+  attachLifecycle(browser, { shared: true });
   return browser;
 }
 
@@ -58,7 +58,7 @@ async function tryConnectCDP() {
  */
 async function tryLaunchChannel(channel) {
   const browser = await chromium.launch({ headless: true, channel, args: FAST_ARGS });
-  attachLifecycle(browser);
+  attachLifecycle(browser, { shared: true });
   return browser;
 }
 
@@ -71,7 +71,7 @@ async function tryLaunchExecutable() {
     throw new Error('PLAYWRIGHT_CHROMIUM_EXECUTABLE not set or path does not exist');
   }
   const browser = await chromium.launch({ headless: true, executablePath: execPath, args: FAST_ARGS });
-  attachLifecycle(browser);
+  attachLifecycle(browser, { shared: true });
   return browser;
 }
 
@@ -80,8 +80,31 @@ async function tryLaunchExecutable() {
  */
 async function tryLaunchDefault() {
   const browser = await chromium.launch({ headless: true, args: FAST_ARGS });
-  attachLifecycle(browser);
+  attachLifecycle(browser, { shared: true });
   return browser;
+}
+
+/**
+ * Create a brand-new browser instance (not the shared one).
+ * Useful for per-request isolation. This will NOT set the shared browserPromise.
+ */
+export async function createNewBrowserInstance() {
+  // Try similar strategies as getBrowser but do not touch shared state.
+  // Strategy: prefer system channel / default launch. CDP attach is not appropriate for a fresh instance.
+  try {
+    try {
+      return await tryLaunchChannel('chrome');
+    } catch (e) {}
+    try {
+      return await tryLaunchChannel('chromium');
+    } catch (e) {}
+    try {
+      return await tryLaunchExecutable();
+    } catch (e) {}
+    return await tryLaunchDefault();
+  } catch (err) {
+    throw new Error(`Failed to create new browser instance: ${String(err && err.message ? err.message : err)}`);
+  }
 }
 
 /**

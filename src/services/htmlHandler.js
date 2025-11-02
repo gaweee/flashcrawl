@@ -5,7 +5,7 @@ import { config } from '../utils/config.js';
 /**
  * Process an HTML page and return markdown, metadata and headers
  */
-export async function processHtml(page, response, url) {
+export async function processHtml(page, response, url, redirects = []) {
   const { markdown, metadata } = await extractHtmlContent(page, { sanitize: config.sanitizeHtml });
   const hash = createHash('sha256').update(markdown).digest('hex');
   return {
@@ -16,6 +16,7 @@ export async function processHtml(page, response, url) {
       status: response.status()
     },
     metadata: metadata ?? { title: null, description: null, h1: [], h2: [] },
+    redirects,
     markdown,
   };
 }
@@ -25,7 +26,7 @@ export async function processHtml(page, response, url) {
  * If page/response not provided it will create a page and navigate to url.
  * Returns { markdown, metadata, hash, headers }
  */
-export async function handleRequest({ context, page = null, response = null, url }) {
+export async function handleRequest({ context, page = null, response = null, url, redirects = [] }) {
   let created = false;
   try {
     if (!page) {
@@ -35,7 +36,7 @@ export async function handleRequest({ context, page = null, response = null, url
     }
 
     if (!response) throw new Error('No response from page');
-    return await processHtml(page, response, url);
+    return await processHtml(page, response, url, redirects);
   } finally {
     if (created && page) await page.close().catch(() => {});
   }

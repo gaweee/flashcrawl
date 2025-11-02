@@ -25,7 +25,7 @@ export async function fetchPdf(context, url) {
  * Convert a PDF buffer to markdown and compute a hash.
  * Returns { markdown, hash, headers, metadata }
  */
-export async function processPdfBuffer(buffer, url) {
+export async function processPdfBuffer(buffer, url, redirects = []) {
   const markdown = await convertPdfBufferToMarkdown(buffer);
   const hash = createHash('sha256').update(markdown).digest('hex');
   return {
@@ -33,20 +33,21 @@ export async function processPdfBuffer(buffer, url) {
     hash,
     headers: { 'content-type': 'application/pdf', status: 200 },
     metadata: {  },
+    redirects,
     markdown
   };
 }
 
-export async function fetchAndProcessPdf(context, url) {
+export async function fetchAndProcessPdf(context, url, redirects = []) {
   const buf = await fetchPdf(context, url);
-  return await processPdfBuffer(buf, url);
+  return await processPdfBuffer(buf, url, redirects);
 }
 
 /**
  * Handler entry point for PDFs. Accepts an object with context/page/response/url
  * and returns a response-shaped object: { url, hash, markdown, headers, metadata }
  */
-export async function handleRequest({ context, page = null, response = null, url }) {
+export async function handleRequest({ context, page = null, response = null, url, redirects = [] }) {
   // If response available and has body, prefer reading it
   if (response) {
     try {
@@ -59,5 +60,5 @@ export async function handleRequest({ context, page = null, response = null, url
 
   // Otherwise fetch via request API
   const buf = await fetchPdf(context, url);
-  return await processPdfBuffer(buf, url);
+  return await processPdfBuffer(buf, url, redirects);
 }

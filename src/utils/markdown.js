@@ -316,8 +316,8 @@ export const extractHtmlContent = async (page, { sanitize = true } = {}) => {
           document.querySelector('meta[name="description"]')?.getAttribute('content') ??
           document.querySelector('meta[property="og:description"]')?.getAttribute('content') ??
           null,
-        h1: uniqueText('h1'),
-        h2: uniqueText('h2'),
+        h1: uniqueText('h1').slice(0,5),
+        h2: uniqueText('h2').slice(0,5),
       },
     };
   };
